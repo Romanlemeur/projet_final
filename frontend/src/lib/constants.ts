@@ -8,3 +8,5 @@ export const FOOTER_LINKS = [
 	{ label: "Instagram", href: "#" },
 	{ label: "Privacy", href: "#" },
 ] as const;
+
+export const SERVICES = ["Spotify", "Apple Music", "SoundCloud", "Tidal", "YouTube Music", "Deezer", "Amazon Music", "Pandora"] as const;
