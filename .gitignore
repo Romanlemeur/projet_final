@@ -1,32 +1,65 @@
-# Environnement virtuel
+# ===== ENVIRONNEMENT VIRTUEL =====
 venv/
 .venv/
+env/
+.env/
 
-# Cache Python
+# ===== CACHE PYTHON =====
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.pyo
 .pytest_cache/
+.mypy_cache/
 
-# Dataset (trop gros pour GitHub)
+# ===== DONNÉES VOLUMINEUSES =====
+# Dossiers de musique
+music_train/
+data/input/
+data/output/
 data/fma/
-data/fma_small.zip
-data/dataset/*.pkl
+data/dataset/
 
-# Fichiers audio (optionnel - à discuter avec l'équipe)
-# data/input/*.mp3
-# data/output/*.wav
+# Fichiers audio
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
 
-# Modèles entraînés (peuvent être gros)
-# models/*.pth
+# ===== MODÈLES IA =====
+*.pth
+*.pt
+models/
+AI/models/*.pth
+models/*.pth
+models/*.pt
+models/*.h5
+models/*.pkl
+*.onnx
 
-# IDE
+# ===== FICHIERS TEMPORAIRES =====
+*.log
+*.tmp
+*.temp
+*.bak
+
+# ===== IDE =====
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# OS
+# ===== OS =====
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Logs
-*.log
+# ===== JUPYTER =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== DIVERS =====
+*.zip
+*.tar.gz
+*.rar
