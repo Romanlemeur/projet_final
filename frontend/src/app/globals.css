@@ -19,3 +19,18 @@ body {
 	color: #ffffff;
 	font-family: Arial, Helvetica, sans-serif;
 }
+
+.bento-card {
+	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	backdrop-filter: blur(20px);
+	border-radius: 32px;
+	transition:
+		transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+		border-color 0.4s ease;
+}
+
+.bento-card:hover {
+	transform: translateY(-2px);
+	border-color: rgba(29, 185, 84, 0.3);
+}
