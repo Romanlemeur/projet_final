@@ -8,6 +8,16 @@ export interface Track {
 	color: string;
 }
 
+export interface QueueItem {
+	id: string;
+	fromTrack: Track;
+	toTrack: Track;
+	status: "pending" | "processing" | "completed";
+	transitionDuration: number;
+	fromBpm: number;
+	toBpm: number;
+}
+
 export const mockTracks: Track[] = [
 	{
 		id: "t1",
@@ -35,5 +45,17 @@ export const mockTracks: Track[] = [
 		bpm: 120,
 		key: "Fm",
 		color: "#f59e0b",
+	},
+];
+
+export const mockQueue: QueueItem[] = [
+	{
+		id: "q1",
+		fromTrack: mockTracks[0],
+		toTrack: mockTracks[1],
+		status: "completed",
+		transitionDuration: 8,
+		fromBpm: 124,
+		toBpm: 128,
 	},
 ];

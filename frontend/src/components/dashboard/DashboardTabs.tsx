@@ -1,8 +1,9 @@
 "use client";
 
 import { motion } from "framer-motion";
+import { mockQueue } from "@/lib/dashboard-data";
 
-export type TabId = "library";
+export type TabId = "library" | "builder" | "queue";
 
 interface Tab {
 	id: TabId;
@@ -21,7 +22,43 @@ function LibraryIcon() {
 	);
 }
 
-const tabs: Tab[] = [{ id: "library", label: "Track Library", icon: <LibraryIcon /> }];
+function BuilderIcon() {
+	return (
+		<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+			<polyline points="16 3 21 3 21 8" />
+			<line x1="4" y1="20" x2="21" y2="3" />
+			<polyline points="21 16 21 21 16 21" />
+			<line x1="15" y1="15" x2="21" y2="21" />
+			<line x1="4" y1="4" x2="9" y2="9" />
+		</svg>
+	);
+}
+
+function QueueIcon() {
+	return (
+		<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+			<line x1="8" y1="6" x2="21" y2="6" />
+			<line x1="8" y1="12" x2="21" y2="12" />
+			<line x1="8" y1="18" x2="21" y2="18" />
+			<line x1="3" y1="6" x2="3.01" y2="6" />
+			<line x1="3" y1="12" x2="3.01" y2="12" />
+			<line x1="3" y1="18" x2="3.01" y2="18" />
+		</svg>
+	);
+}
+
+const pendingCount = mockQueue.filter((q) => q.status !== "completed").length;
+
+const tabs: Tab[] = [
+	{ id: "library", label: "Track Library", icon: <LibraryIcon /> },
+	{ id: "builder", label: "Transition Builder", icon: <BuilderIcon /> },
+	{
+		id: "queue",
+		label: "Generation Queue",
+		icon: <QueueIcon />,
+		badge: pendingCount > 0 ? pendingCount : undefined,
+	},
+];
 
 interface DashboardTabsProps {
 	activeTab: TabId;

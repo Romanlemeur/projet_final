@@ -5,9 +5,13 @@ import { AnimatePresence } from "framer-motion";
 import DashboardHeader from "./DashboardHeader";
 import DashboardTabs, { type TabId } from "./DashboardTabs";
 import TrackLibrary from "./TrackLibrary";
+import TransitionBuilder from "./TransitionBuilder";
+import GenerationQueue from "./GenerationQueue";
 
 const TAB_PANELS: Record<TabId, React.ReactNode> = {
 	library: <TrackLibrary />,
+	builder: <TransitionBuilder />,
+	queue: <GenerationQueue />,
 };
 
 export default function DashboardClient() {

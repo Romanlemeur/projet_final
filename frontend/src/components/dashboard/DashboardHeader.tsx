@@ -13,7 +13,7 @@ function UserAvatar() {
 export default function DashboardHeader() {
 	return (
 		<header className="flex items-center justify-between px-4 sm:px-8 lg:px-12 py-5">
-			<Link href="/" className="flex items-center gap-2.5 group focus-ring rounded-lg">
+			<Link href="/" className="flex items-center gap-2.5 group rounded-lg">
 				<span className="font-bold text-xl tracking-tight text-white">Project</span>
 			</Link>
 
