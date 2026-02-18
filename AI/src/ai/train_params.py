@@ -12,8 +12,8 @@ class ParamsVAETrainer:
         self.model = model.to(self.device)
         print(f"Device: {self.device}")
 
-    def train(self, dataset, epochs=500, batch_size=64, lr=0.0003, save_path="models/params_vae.pth"):
-        print(f"Entrainement: {epochs} epoques, {len(dataset)} echantillons")
+    def train(self, dataset, epochs=500, batch_size=32, lr=0.0003, save_path="models/params_vae.pth"):
+        print(f"\nTraining: {epochs} epochs, {len(dataset)} samples, batch={batch_size}")
         
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=50, T_mult=2)
@@ -24,6 +24,7 @@ class ParamsVAETrainer:
         for epoch in range(epochs):
             self.model.train()
             epoch_loss = 0
+            valid_batches = 0
             
             for _ in range(n_batches):
                 inputs, targets = dataset.get_batch(batch_size)
@@ -41,18 +42,21 @@ class ParamsVAETrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
                 epoch_loss += loss.item()
+                valid_batches += 1
             
             scheduler.step()
-            avg_loss = epoch_loss / n_batches
             
-            if (epoch + 1) % 50 == 0:
-                print(f"Epoque {epoch+1}/{epochs} | Loss: {avg_loss:.6f}")
-            
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                self.save_model(save_path)
+            if valid_batches > 0:
+                avg_loss = epoch_loss / valid_batches
+                
+                if (epoch + 1) % 50 == 0:
+                    print(f"  Epoch {epoch+1:4d}/{epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.6f}")
+                
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    self.save_model(save_path)
         
-        print(f"Termine. Best loss: {best_loss:.6f}")
+        print(f"\nTraining complete. Best loss: {best_loss:.6f}")
 
     def save_model(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -66,23 +70,24 @@ class ParamsVAETrainer:
 
 def train_params_model(music_folder="data/input/music_train/fma_small/fma_small",
                        epochs=500,
-                       max_songs=2000,
-                       max_pairs=10000,
-                       batch_size=64,
+                       max_songs=200,
+                       max_pairs=2000,
+                       batch_size=32,
                        learning_rate=0.0003,
                        save_path="models/params_vae.pth"):
     
-    print("=" * 50)
-    print("ENTRAINEMENT IA DJ - 24 PARAMETRES")
-    print("=" * 50)
+    print("=" * 60)
+    print("  DJ AI TRANSITION MODEL - TRAINING")
+    print("=" * 60)
     
     dataset = TransitionParamsDataset()
     dataset.build_from_folder(music_folder, max_songs=max_songs, max_pairs=max_pairs)
     
     if len(dataset) == 0:
-        print("Erreur: aucun echantillon")
+        print("Error: No training data")
         return
     
+    os.makedirs("data/dataset", exist_ok=True)
     dataset.save("data/dataset/params_dataset.pkl")
     
     model = TransitionParamsVAE(
@@ -93,4 +98,14 @@ def train_params_model(music_folder="data/input/music_train/fma_small/fma_small"
     )
     
     trainer = ParamsVAETrainer(model)
-    trainer.train(dataset, epochs=epochs, batch_size=batch_size, lr=learning_rate, save_path=save_path)
+    trainer.train(
+        dataset,
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=learning_rate,
+        save_path=save_path
+    )
+    
+    print("\n" + "=" * 60)
+    print("  TRAINING COMPLETE")
+    print("=" * 60)
