@@ -1,326 +1,339 @@
-"""Dataset avec analyse des points de coupe optimaux."""
-
 import numpy as np
 import librosa
 import pickle
 import os
 from pathlib import Path
 import random
+from scipy.signal import medfilt
+from scipy.ndimage import uniform_filter1d
 
 from src.analysis.feature_extractor import FeatureExtractor
 from src.analysis.key_analyzer import KeyAnalyzer
-from src.analysis.beat_detector import BeatDetector
 from src.utils.config import SAMPLE_RATE
 
 
+CAMELOT_WHEEL = {
+    'C': '8B', 'Am': '8A', 'G': '9B', 'Em': '9A', 'D': '10B', 'Bm': '10A',
+    'A': '11B', 'F#m': '11A', 'E': '12B', 'C#m': '12A', 'B': '1B', 'G#m': '1A',
+    'F#': '2B', 'D#m': '2A', 'Db': '3B', 'Bbm': '3A', 'Ab': '4B', 'Fm': '4A',
+    'Eb': '5B', 'Cm': '5A', 'Bb': '6B', 'Gm': '6A', 'F': '7B', 'Dm': '7A'
+}
+
+
 class TransitionParamsDataset:
-    """
-    Dataset qui génère des paramètres de transition "idéaux"
-    incluant les points de coupe optimaux.
-    """
-    
-    def __init__(self, sample_rate: int = SAMPLE_RATE):
+    def __init__(self, sample_rate=SAMPLE_RATE):
         self.sample_rate = sample_rate
         self.feature_extractor = FeatureExtractor(sample_rate)
         self.key_analyzer = KeyAnalyzer(sample_rate)
-        self.beat_detector = BeatDetector(sample_rate)
         self.data = []
-        
         self.circle_of_fifths = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F']
-    
-    def _extract_features(self, audio: np.ndarray) -> dict:
-        """Extrait les features complètes incluant l'analyse des beats."""
+        self.hop_length = 512
+
+    def _detect_vocals_score(self, audio):
+        mfcc = librosa.feature.mfcc(y=audio, sr=self.sample_rate, n_mfcc=13, hop_length=self.hop_length)
+        centroid = librosa.feature.spectral_centroid(y=audio, sr=self.sample_rate, hop_length=self.hop_length)[0]
+        flatness = librosa.feature.spectral_flatness(y=audio, hop_length=self.hop_length)[0]
+        contrast = librosa.feature.spectral_contrast(y=audio, sr=self.sample_rate, hop_length=self.hop_length)
         
+        centroid_norm = centroid / (self.sample_rate / 2)
+        mfcc_var = np.var(mfcc[1:6], axis=0)
+        mfcc_energy = np.mean(np.abs(mfcc[1:5]), axis=0)
+        contrast_mid = np.mean(contrast[2:5], axis=0)
+        
+        score = np.zeros(len(centroid))
+        score += (centroid_norm > 0.03) * (centroid_norm < 0.28) * 0.24
+        score += (flatness < 0.18) * 0.18
+        score += (mfcc_var > np.percentile(mfcc_var, 20)) * 0.20
+        score += (mfcc_energy > np.percentile(mfcc_energy, 22)) * 0.16
+        score += (contrast_mid > np.percentile(contrast_mid, 28)) * 0.22
+        
+        score = medfilt(score, kernel_size=17)
+        return np.mean(score)
+
+    def _get_breakdown_score(self, audio):
+        rms = librosa.feature.rms(y=audio, hop_length=self.hop_length)[0]
+        rms_smooth = uniform_filter1d(rms, size=25)
+        
+        try:
+            _, percussive = librosa.effects.hpss(audio)
+            perc_rms = librosa.feature.rms(y=percussive, hop_length=self.hop_length)[0]
+            perc_ratio = np.mean(perc_rms) / (np.mean(rms_smooth) + 1e-8)
+        except:
+            perc_ratio = 0.5
+        
+        energy_stability = 1.0 - min(np.std(rms_smooth) / (np.mean(rms_smooth) + 1e-8), 1.0)
+        
+        return (1 - perc_ratio) * 0.5 + energy_stability * 0.5
+
+    def _get_camelot(self, key, mode):
+        key_str = key + 'm' if mode == 'minor' else key
+        for k, cam in CAMELOT_WHEEL.items():
+            if k.lower() == key_str.lower() or k.lower() == key.lower():
+                return cam
+        return '8A' if mode == 'minor' else '8B'
+
+    def _camelot_distance(self, cam1, cam2):
+        if cam1 == cam2:
+            return 0
+        num1, num2 = int(cam1[:-1]), int(cam2[:-1])
+        letter1, letter2 = cam1[-1], cam2[-1]
+        
+        if num1 == num2 and letter1 != letter2:
+            return 0.5
+        
+        dist = min(abs(num1 - num2), 12 - abs(num1 - num2))
+        return dist
+
+    def _extract_features(self, audio):
         features = self.feature_extractor.extract_all(audio)
         key_info = self.key_analyzer.detect_key(audio)
         
-        # Analyse des beats
         try:
             tempo, beat_frames = librosa.beat.beat_track(y=audio, sr=self.sample_rate)
             beat_times = librosa.frames_to_time(beat_frames, sr=self.sample_rate)
-            
-            # Calculer la force des beats
-            onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate)
-            beat_strengths = onset_env[beat_frames] if len(beat_frames) > 0 else np.array([0.5])
+            beat_reg = 1.0 - np.std(np.diff(beat_times)) / (np.mean(np.diff(beat_times)) + 1e-8) if len(beat_times) > 2 else 0.5
+            beat_reg = max(0, min(1, beat_reg))
+            if isinstance(tempo, np.ndarray):
+                tempo = float(tempo[0])
         except:
+            beat_reg = 0.5
             tempo = features['bpm']
-            beat_times = np.array([])
-            beat_strengths = np.array([0.5])
         
-        # Analyse de l'énergie par segment
-        duration = len(audio) / self.sample_rate
-        n_segments = 10
-        segment_len = len(audio) // n_segments
+        stft = np.abs(librosa.stft(audio))
+        low_e = np.mean(stft[:int(stft.shape[0] * 0.1), :])
+        mid_e = np.mean(stft[int(stft.shape[0] * 0.1):int(stft.shape[0] * 0.5), :])
+        high_e = np.mean(stft[int(stft.shape[0] * 0.5):, :])
+        total = low_e + mid_e + high_e + 1e-8
         
-        energy_profile = []
-        for i in range(n_segments):
-            start = i * segment_len
-            end = (i + 1) * segment_len
-            seg_energy = np.sqrt(np.mean(audio[start:end] ** 2))
-            energy_profile.append(seg_energy)
+        rms = librosa.feature.rms(y=audio)[0]
+        rms_var = np.std(rms) / (np.mean(rms) + 1e-8)
         
-        energy_profile = np.array(energy_profile)
-        energy_profile = energy_profile / (np.max(energy_profile) + 1e-8)
+        onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate)
+        onset_density = np.sum(onset_env > np.mean(onset_env) * 1.5) / len(onset_env)
         
-        # Trouver les meilleurs points de coupe (où l'énergie est basse)
-        best_outro_segment = np.argmin(energy_profile[5:]) + 5  # Chercher dans la 2ème moitié
-        best_intro_segment = np.argmin(energy_profile[:5])  # Chercher dans la 1ère moitié
-        
-        # Features spectrales
         spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=audio, sr=self.sample_rate))
         spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(y=audio, sr=self.sample_rate))
-        zero_crossing = np.mean(librosa.feature.zero_crossing_rate(audio))
+        spectral_flatness = np.mean(librosa.feature.spectral_flatness(y=audio))
         
-        # Régularité des beats (pour savoir si on peut couper sur un beat)
-        if len(beat_times) > 2:
-            beat_intervals = np.diff(beat_times)
-            beat_regularity = 1.0 - np.std(beat_intervals) / (np.mean(beat_intervals) + 1e-8)
-            beat_regularity = max(0, min(1, beat_regularity))
-        else:
-            beat_regularity = 0.5
+        vocal_score = self._detect_vocals_score(audio)
+        breakdown_score = self._get_breakdown_score(audio)
         
-        # Normaliser
-        bpm_norm = features['bpm'] / 200.0
-        energy_norm = features['energy']
+        camelot = self._get_camelot(key_info['key'], key_info['mode'])
         
         key = key_info['key']
         key_pos = self.circle_of_fifths.index(key) / 12.0 if key in self.circle_of_fifths else 0.5
-        mode_binary = 1.0 if key_info['mode'] == 'major' else 0.0
         
         return {
             'features_array': np.array([
-                bpm_norm,
-                energy_norm,
+                tempo / 200.0,
+                features['energy'],
                 key_pos,
-                mode_binary,
+                1.0 if key_info['mode'] == 'major' else 0.0,
                 key_info['confidence'],
+                low_e / total,
+                mid_e / total,
+                high_e / total,
                 min(spectral_centroid / 5000.0, 1.0),
                 min(spectral_rolloff / 10000.0, 1.0),
-                min(zero_crossing * 10, 1.0),
-                features['duration'] / 300.0,
-                np.std(audio),
-                beat_regularity,
-                best_outro_segment / 10.0,
-                best_intro_segment / 10.0,
-                np.mean(beat_strengths) if len(beat_strengths) > 0 else 0.5
+                min(spectral_flatness * 10, 1.0),
+                beat_reg,
+                min(rms_var, 1.0),
+                min(onset_density * 5, 1.0)
             ], dtype=np.float32),
-            'bpm': features['bpm'],
+            'bpm': tempo,
             'energy': features['energy'],
-            'beat_regularity': beat_regularity,
-            'energy_profile': energy_profile,
-            'best_outro': best_outro_segment / 10.0,
-            'best_intro': best_intro_segment / 10.0,
-            'spectral_centroid': spectral_centroid / 5000.0,
-            'key_pos': key_pos,
-            'mode': mode_binary
+            'key': key_info['key'],
+            'mode': key_info['mode'],
+            'camelot': camelot,
+            'key_confidence': key_info['confidence'],
+            'low_ratio': low_e / total,
+            'mid_ratio': mid_e / total,
+            'high_ratio': high_e / total,
+            'beat_regularity': beat_reg,
+            'vocal_presence': vocal_score,
+            'breakdown_score': breakdown_score
         }
-    
-    def _compute_ideal_params(self, feat1: dict, feat2: dict) -> np.ndarray:
-        """
-        Calcule les paramètres de transition "idéaux" incluant les points de coupe.
-        """
+
+    def _compute_ideal_params(self, f1, f2):
+        bpm1, bpm2 = f1['bpm'], f2['bpm']
+        energy1, energy2 = f1['energy'], f2['energy']
+        vocals1, vocals2 = f1['vocal_presence'], f2['vocal_presence']
+        breakdown1, breakdown2 = f1['breakdown_score'], f2['breakdown_score']
+        low1, low2 = f1['low_ratio'], f2['low_ratio']
+        beat_reg1, beat_reg2 = f1['beat_regularity'], f2['beat_regularity']
         
-        f1 = feat1['features_array']
-        f2 = feat2['features_array']
+        cam_dist = self._camelot_distance(f1['camelot'], f2['camelot'])
+        key_compat = max(0, 1.0 - cam_dist * 0.15)
         
-        bpm1, energy1, key1, mode1 = f1[0], f1[1], f1[2], f1[3]
-        bpm2, energy2, key2, mode2 = f2[0], f2[1], f2[2], f2[3]
-        
-        centroid1, centroid2 = f1[5], f2[5]
-        beat_reg1, beat_reg2 = f1[10], f2[10]
-        best_outro1, best_intro2 = f1[11], f2[12]
-        
-        # === CALCULS DE BASE ===
-        bpm_diff = abs(bpm1 - bpm2)
+        bpm_diff = abs(bpm1 - bpm2) / max(bpm1, bpm2)
         energy_diff = abs(energy1 - energy2)
-        key_diff = abs(key1 - key2)
-        similarity = 1 - (bpm_diff + energy_diff + key_diff) / 3
+        similarity = (key_compat * 0.4 + (1 - bpm_diff) * 0.35 + (1 - energy_diff) * 0.25)
         
-        # === POINTS DE COUPE (NOUVEAU) ===
+        both_vocals = vocals1 > 0.38 and vocals2 > 0.38
         
-        # Track 1 - Point de coupe
-        # Si l'énergie baisse vers la fin, couper plus tard
-        # Si les beats sont réguliers, préférer couper sur un beat
-        track1_cut_position = 0.7 + best_outro1 * 0.2  # Utiliser l'analyse d'énergie
-        track1_cut_on_beat = beat_reg1  # Plus régulier = plus on coupe sur un beat
-        track1_cut_on_bar = beat_reg1 * 0.8  # Préférence mesure légèrement plus faible
-        track1_fade_before = 0.2 + (1 - similarity) * 0.3  # Plus long si morceaux différents
-        
-        # Track 2 - Point de départ
-        # Si l'énergie est basse au début, commencer tôt
-        # Sinon, chercher un meilleur point d'entrée
-        track2_start_position = best_intro2 * 0.3  # Utiliser l'analyse d'énergie
-        track2_start_on_beat = beat_reg2
-        track2_start_on_bar = beat_reg2 * 0.8
-        track2_fade_after = 0.2 + (1 - similarity) * 0.3
-        
-        # === STRUCTURE ===
-        if similarity > 0.7:
-            phase1_dur, phase2_dur, phase3_dur = 0.30, 0.30, 0.40
-        elif similarity > 0.4:
-            phase1_dur, phase2_dur, phase3_dur = 0.35, 0.35, 0.30
+        if both_vocals:
+            duck_v1 = 0.72
+            duck_v2 = 0.55
+            mid_eq_1 = -0.75
+            mid_eq_2 = -0.55
         else:
-            phase1_dur, phase2_dur, phase3_dur = 0.30, 0.45, 0.25
+            duck_v1 = vocals1 * 0.32
+            duck_v2 = vocals2 * 0.32
+            mid_eq_1 = -0.22 if vocals1 > 0.38 else 0.0
+            mid_eq_2 = -0.22 if vocals2 > 0.38 else 0.0
         
-        total_dur_factor = 0.8 + (1 - similarity) * 0.4
-        overlap = 0.15 + similarity * 0.1
+        good_bd1 = breakdown1 > 0.58 and vocals1 < 0.32
+        good_bd2 = breakdown2 > 0.58 and vocals2 < 0.32
         
-        # === FILTRES P1 ===
-        p1_filter_start = 0.7 + centroid1 * 0.3
-        p1_filter_end = 0.1 + similarity * 0.2
-        p1_resonance = 0.3 + (1 - similarity) * 0.3
-        p1_curve = 0.5 + (1 - similarity) * 0.3
-        
-        # === FILTRES P3 ===
-        p3_filter_start = 0.15 + (1 - similarity) * 0.1
-        p3_filter_end = 0.6 + centroid2 * 0.4
-        p3_resonance = 0.2 + centroid2 * 0.2
-        p3_curve = 0.4 + similarity * 0.2
-        
-        # === EFFETS ===
-        reverb_amount = 0.2 + (1 - similarity) * 0.4
-        reverb_decay = 0.3 + (1 - similarity) * 0.3
-        echo_amount = 0.1 + (1 - similarity) * 0.3
-        echo_delay = 0.3 + bpm1 * 0.2
-        echo_feedback = 0.2 + (1 - similarity) * 0.2
-        use_riser = 1.0 if (1 - similarity) > 0.4 else 0.0
-        
-        # === MIX ===
-        drums_vol, harmonic_vol, bass_vol = 0.35, 0.45, 0.20
-        bass_swap = 0.5 + energy_diff * 0.2
-        crossfade_curve = similarity * 0.5 + 0.25
-        
-        if energy2 > energy1:
-            energy_curve = 0.6 + (energy2 - energy1) * 0.4
+        if good_bd1 and good_bd2:
+            cue_out = 0.62
+            cue_in = 0.12
+        elif good_bd1:
+            cue_out = 0.58
+            cue_in = 0.06
+        elif good_bd2:
+            cue_out = 0.78
+            cue_in = 0.14
         else:
-            energy_curve = 0.4 - (energy1 - energy2) * 0.2
+            cue_out = 0.76
+            cue_in = 0.06
         
-        # === STYLE ===
-        if similarity > 0.7 and energy1 > 0.5:
-            style_smooth, style_dramatic, style_ambient = 0.7, 0.2, 0.1
-        elif (1 - similarity) > 0.5:
-            style_smooth, style_dramatic, style_ambient = 0.2, 0.6, 0.2
+        if similarity > 0.72:
+            mix_style = 0
+            transition_beats = 32
+            crossfade_type = 1
+        elif energy2 > energy1 + 0.12:
+            mix_style = 3
+            transition_beats = 48
+            crossfade_type = 2
+        elif bpm_diff > 0.08:
+            mix_style = 2
+            transition_beats = 24
+            crossfade_type = 0
         else:
-            style_smooth, style_dramatic, style_ambient = 0.4, 0.3, 0.3
+            mix_style = 1
+            transition_beats = 32
+            crossfade_type = 1
         
-        brightness_target = (centroid1 + centroid2) / 2
-        tension = (1 - similarity) * 0.7 + bpm_diff * 0.3
+        low_eq_1 = -0.92 if low2 > 0.32 else -0.52
+        low_eq_2 = -1.05 if low1 > 0.32 else -0.62
+        high_eq_1 = -0.32
+        high_eq_2 = -0.42
+        
+        bass_swap = 0.42 if similarity > 0.7 else (0.32 if energy2 > energy1 else 0.52)
+        eq_swap = 0.38 if similarity > 0.7 else 0.28
+        
+        filter_sweep = 0.82 if mix_style == 3 else (0.18 if similarity > 0.82 else 0.48)
+        filter_res = 0.14 + (1 - similarity) * 0.38
+        
+        if similarity > 0.85:
+            tension = 0
+        elif mix_style == 3:
+            tension = 3
+        elif vocals1 > 0.48 or vocals2 > 0.48:
+            tension = 2
+        else:
+            tension = 1
+        
+        energy_dir = 0.78 if energy2 > energy1 else (0.22 if energy1 > energy2 else 0.5)
         
         return np.array([
-            # Points de coupe (8)
-            track1_cut_position, track1_cut_on_beat, track1_cut_on_bar, track1_fade_before,
-            track2_start_position, track2_start_on_beat, track2_start_on_bar, track2_fade_after,
-            # Structure (5)
-            phase1_dur, phase2_dur, phase3_dur, total_dur_factor, overlap,
-            # Filtres P1 (4)
-            p1_filter_start, p1_filter_end, p1_resonance, p1_curve,
-            # Filtres P3 (4)
-            p3_filter_start, p3_filter_end, p3_resonance, p3_curve,
-            # Effets (6)
-            reverb_amount, reverb_decay, echo_amount, echo_delay, echo_feedback, use_riser,
-            # Mix (6)
-            drums_vol, harmonic_vol, bass_vol, bass_swap, crossfade_curve, energy_curve,
-            # Style (5)
-            style_smooth, style_dramatic, style_ambient, brightness_target, tension
+            (low_eq_1 + 1.0) / 1.5,
+            (mid_eq_1 + 1.0) / 1.5,
+            (high_eq_1 + 1.0) / 1.5,
+            (low_eq_2 + 1.0) / 1.5,
+            (mid_eq_2 + 1.0) / 1.5,
+            (high_eq_2 + 1.0) / 1.5,
+            0.65 if energy1 > energy2 else 0.55,
+            0.65 if energy2 > energy1 else 0.55,
+            crossfade_type / 3.0,
+            0.5,
+            (cue_out - 0.6) / 0.35,
+            cue_in / 0.2,
+            (beat_reg1 + beat_reg2) / 2,
+            1.0 if (beat_reg1 > 0.7 and beat_reg2 > 0.7) else 0.6,
+            (transition_beats - 16) / 48,
+            (eq_swap - 0.3) / 0.4,
+            (bass_swap - 0.4) / 0.3,
+            mix_style / 4.0,
+            filter_sweep,
+            (filter_res - 0.1) / 0.6,
+            tension / 4.0,
+            duck_v1,
+            duck_v2,
+            energy_dir
         ], dtype=np.float32)
-    
-    def build_from_folder(self, music_folder: str, max_samples: int = 800):
-        print(f"📂 Scan: {music_folder}")
+
+    def build_from_folder(self, music_folder, max_songs=200, max_pairs=2000):
+        print(f"Scanning: {music_folder}")
         
         audio_files = []
-        for ext in ['*.mp3', '*.wav', '*.flac']:
-            audio_files.extend(Path(music_folder).glob(ext))
+        for ext in ['*.mp3', '*.wav', '*.flac', '*.ogg', '*.m4a']:
+            audio_files.extend(list(Path(music_folder).rglob(ext)))
         
-        audio_files = list(audio_files)
-        print(f"  Fichiers: {len(audio_files)}")
+        print(f"Found: {len(audio_files)} files")
         
-        if len(audio_files) < 2:
-            print("  ⚠️ Il faut au moins 2 fichiers !")
-            return
-        
-        print("🎵 Analyse approfondie des morceaux...")
+        random.shuffle(audio_files)
+        audio_files = audio_files[:max_songs]
         audio_data = []
         
-        for f in audio_files[:50]:  # Analyser jusqu'à 50 fichiers
+        print(f"Analyzing: {len(audio_files)} tracks")
+        
+        for i, f in enumerate(audio_files):
             try:
-                audio, _ = librosa.load(str(f), sr=self.sample_rate, mono=True, duration=90)
-                if len(audio) > self.sample_rate * 15:
+                audio, _ = librosa.load(str(f), sr=self.sample_rate, mono=True, duration=30)
+                if len(audio) > self.sample_rate * 5:
                     features = self._extract_features(audio)
-                    audio_data.append({'file': f.name, 'features': features})
-                    print(f"  ✓ {f.name} (BPM: {features['bpm']:.0f}, Energy: {features['energy']:.2f})")
+                    audio_data.append({
+                        'file': f.name,
+                        'features': features
+                    })
             except Exception as e:
-                print(f"  ✗ {f.name}: {e}")
+                pass
+            
+            if (i + 1) % 25 == 0:
+                print(f"  {i+1}/{len(audio_files)} ({len(audio_data)} valid)")
         
-        print(f"\n📊 Analysés: {len(audio_data)}")
-        print(f"🔨 Création des échantillons...")
+        print(f"Valid tracks: {len(audio_data)}")
         
-        for i in range(min(max_samples, len(audio_data) * (len(audio_data) - 1))):
+        if len(audio_data) < 2:
+            print("Error: Not enough valid tracks")
+            return
+        
+        n_pairs = min(max_pairs, len(audio_data) * (len(audio_data) - 1) // 2)
+        print(f"Generating: {n_pairs} pairs")
+        
+        for i in range(n_pairs):
             idx1, idx2 = random.sample(range(len(audio_data)), 2)
+            f1, f2 = audio_data[idx1]['features'], audio_data[idx2]['features']
             
-            feat1 = audio_data[idx1]['features']
-            feat2 = audio_data[idx2]['features']
-            
-            # Input: features des 2 morceaux (14 + 14 = 28)
-            input_features = np.concatenate([
-                feat1['features_array'],
-                feat2['features_array']
-            ])
-            
-            # Target: paramètres idéaux (38)
-            target_params = self._compute_ideal_params(feat1, feat2)
-            
-            self.data.append({'input': input_features, 'target': target_params})
-        
-        print(f"✅ Dataset: {len(self.data)} échantillons")
-    
-    def augment(self):
-        """Augmentation intensive."""
-        print("🔄 Augmentation...")
-        original = len(self.data)
-        augmented = []
-        
-        for sample in self.data:
-            # 1. Inverser
-            input_inv = np.concatenate([sample['input'][14:], sample['input'][:14]])
-            target_inv = sample['target'].copy()
-            # Inverser les points de coupe
-            target_inv[0:4], target_inv[4:8] = target_inv[4:8].copy(), target_inv[0:4].copy()
-            augmented.append({'input': input_inv, 'target': target_inv})
-            
-            # 2-4. Bruit
-            for noise_level in [0.02, 0.04, 0.06]:
-                noise = np.random.randn(*sample['input'].shape) * noise_level
-                augmented.append({
-                    'input': np.clip(sample['input'] + noise, 0, 1).astype(np.float32),
-                    'target': sample['target']
-                })
-            
-            # 5. Variation targets
-            target_var = sample['target'] + np.random.randn(*sample['target'].shape) * 0.03
-            augmented.append({
-                'input': sample['input'],
-                'target': np.clip(target_var, 0, 1).astype(np.float32)
+            self.data.append({
+                'input': np.concatenate([f1['features_array'], f2['features_array']]),
+                'target': self._compute_ideal_params(f1, f2)
             })
+            
+            if (i + 1) % 500 == 0:
+                print(f"  {i+1}/{n_pairs}")
         
-        self.data.extend(augmented)
-        print(f"  {original} → {len(self.data)}")
-    
-    def save(self, path: str):
+        print(f"Dataset size: {len(self.data)} samples")
+
+    def save(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'wb') as f:
             pickle.dump(self.data, f)
-        print(f"💾 Sauvé: {path}")
-    
-    def load(self, path: str):
+        print(f"Saved: {path}")
+
+    def load(self, path):
         with open(path, 'rb') as f:
             self.data = pickle.load(f)
-        print(f"📂 Chargé: {len(self.data)}")
-    
-    def get_batch(self, batch_size: int = 32):
+        print(f"Loaded: {len(self.data)} samples")
+
+    def get_batch(self, batch_size=32):
         indices = random.sample(range(len(self.data)), min(batch_size, len(self.data)))
-        inputs = np.array([self.data[i]['input'] for i in indices])
-        targets = np.array([self.data[i]['target'] for i in indices])
-        return inputs, targets
-    
+        return (
+            np.array([self.data[i]['input'] for i in indices]),
+            np.array([self.data[i]['target'] for i in indices])
+        )
+
     def __len__(self):
         return len(self.data)
