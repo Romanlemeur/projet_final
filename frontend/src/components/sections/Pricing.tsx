@@ -1,5 +1,5 @@
+import AnimateOnScroll from "@/components/ui/AnimateOnScroll";
 import { PRICING_TIERS } from "@/lib/constants";
-import { div } from "framer-motion/client";
 
 function CheckMark() {
 	return (
@@ -23,7 +23,7 @@ export default function Pricing() {
 			<div className="max-w-6xl mx-auto">
 				<div className="grid md:grid-cols-3 gap-6">
 					{PRICING_TIERS.map((tier, i) => (
-						<div key={tier.name}>
+						<AnimateOnScroll key={tier.name} delay={i * 0.1}>
 							<div className={`rounded-[32px] h-full flex flex-col relative ${tier.highlighted ? "bg-gradient-to-b from-green-500/20 via-green-500/5 to-transparent border border-green-500/20 p-8" : "bento-card p-8"}`}>
 								{"badge" in tier && tier.badge && <div className="absolute top-4 right-4 bg-green-500 text-black text-[10px] uppercase font-bold px-3 py-1 rounded-full">{tier.badge}</div>}
 								<h3 className={`text-lg font-bold mb-1 ${tier.highlighted ? "text-green-500" : "text-white/80"}`}>{tier.name}</h3>
@@ -49,7 +49,7 @@ export default function Pricing() {
 									</ul>
 								</div>
 							</div>
-						</div>
+						</AnimateOnScroll>
 					))}
 				</div>
 			</div>

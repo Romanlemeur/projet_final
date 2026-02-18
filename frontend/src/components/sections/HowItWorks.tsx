@@ -1,4 +1,5 @@
 import Image from "next/image";
+import AnimateOnScroll from "@/components/ui/AnimateOnScroll";
 import { STEPS } from "@/lib/constants";
 
 export default function HowItWorks() {
@@ -11,7 +12,7 @@ export default function HowItWorks() {
 			</div>
 			<div className="max-w-7xl mx-auto relative">
 				<div className="grid md:grid-cols-2 gap-16 items-center">
-					<div>
+					<AnimateOnScroll>
 						<span className="text-green-500 font-bold uppercase tracking-widest text-sm mb-4 block">Workflow</span>
 						<h2 className="text-4xl md:text-6xl font-extrabold tracking-tighter mb-8">
 							3 Steps to <br />
@@ -28,9 +29,9 @@ export default function HowItWorks() {
 								</div>
 							))}
 						</div>
-					</div>
+					</AnimateOnScroll>
 
-					<div>
+					<AnimateOnScroll delay={0.2}>
 						<div className="rounded-[40px] border border-white/10 bg-gradient-to-b from-white/5 to-transparent relative overflow-hidden flex flex-col p-6 gap-4">
 							<div className="rounded-2xl overflow-hidden border border-white/5">
 								<Image src="/transition-builder.png" alt="Transition Builder - select tracks and configure AI transition" width={1340} height={878} className="w-full h-auto" />
@@ -44,7 +45,7 @@ export default function HowItWorks() {
 								<Image src="/generation-queue.png" alt="Generation Queue - completed AI transition with waveform" width={1340} height={480} className="w-full h-auto" />
 							</div>
 						</div>
-					</div>
+					</AnimateOnScroll>
 				</div>
 			</div>
 		</section>
