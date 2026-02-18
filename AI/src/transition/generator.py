@@ -37,7 +37,7 @@ class TransitionGenerator:
         print("=" * 60)
         
         # Charger
-        print("\n📂 Chargement...")
+        print("Chargement...")
         audio1, _ = self.loader.load(track1_path)
         audio2, _ = self.loader.load(track2_path)
         
