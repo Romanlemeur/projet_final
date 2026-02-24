@@ -1,3 +1,7 @@
+"use client";
+
+import { createClient } from "@/lib/supabase/client";
+
 function GoogleIcon() {
 	return (
 		<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
@@ -29,8 +33,18 @@ interface SocialButtonProps {
 export default function SocialButton({ provider }: SocialButtonProps) {
 	const { icon, label } = PROVIDERS[provider];
 
+	async function handleClick() {
+		const supabase = createClient();
+		await supabase.auth.signInWithOAuth({
+			provider,
+			options: {
+				redirectTo: `${window.location.origin}/auth/callback`,
+			},
+		});
+	}
+
 	return (
-		<button type="button" className="w-full flex items-center justify-center gap-3 border border-white/10 bg-white/5 hover:bg-white/10 rounded-xl py-3 text-sm font-medium text-white transition-colors cursor-pointer">
+		<button type="button" onClick={handleClick} className="w-full flex items-center justify-center gap-3 border border-white/10 bg-white/5 hover:bg-white/10 rounded-xl py-3 text-sm font-medium text-white transition-colors cursor-pointer">
 			{icon}
 			{label}
 		</button>

@@ -1,14 +1,16 @@
+"use client";
+
 import Link from "next/link";
+import { useActionState } from "react";
 import AuthCard from "@/components/ui/AuthCard";
 import SocialButton from "@/components/ui/SocialButton";
 import Input from "@/components/ui/Input";
 import SubmitButton from "@/components/ui/SubmitButton";
-
-export const metadata = {
-	title: "Sign up - Project",
-};
+import { signUp } from "@/lib/auth-actions";
 
 export default function SignupPage() {
+	const [state, formAction] = useActionState(signUp, null);
+
 	return (
 		<AuthCard>
 			<div className="flex flex-col gap-3 mb-6">
@@ -22,11 +24,13 @@ export default function SignupPage() {
 				<div className="flex-1 h-px bg-white/10" />
 			</div>
 
-			<form className="flex flex-col gap-4">
+			<form action={formAction} className="flex flex-col gap-4">
 				<Input label="Full name" type="text" id="name" name="name" placeholder="Your full name" autoComplete="name" required />
 				<Input label="Email" type="email" id="email" name="email" placeholder="you@example.com" autoComplete="email" required />
 				<Input label="Password" type="password" id="password" name="password" placeholder="Create a password" autoComplete="new-password" required />
 				<Input label="Confirm password" type="password" id="confirm-password" name="confirm-password" placeholder="Confirm your password" autoComplete="new-password" required />
+
+				{state !== null && "error" in state && <p className="text-sm text-red-400 text-center">{state.error}</p>}
 
 				<SubmitButton>Create account</SubmitButton>
 			</form>
