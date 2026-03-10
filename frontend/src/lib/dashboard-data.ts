@@ -3,59 +3,55 @@ export interface Track {
 	title: string;
 	artist: string;
 	duration: string;
-	bpm: number;
-	key: string;
+	durationSeconds: number;
 	color: string;
+	filename: string;
+	originalName: string;
+	bpm?: number;
+	key?: string;
+	mode?: string;
 }
 
 export interface QueueItem {
 	id: string;
 	fromTrack: Track;
 	toTrack: Track;
-	status: "pending" | "processing" | "completed";
+	status: "pending" | "processing" | "completed" | "error";
 	transitionDuration: number;
-	fromBpm: number;
-	toBpm: number;
+	transitionStart?: number;
+	resultUrl?: string;
+	outputFilename?: string;
+	createdAt: number;
 }
 
-export const mockTracks: Track[] = [
-	{
-		id: "t1",
-		title: "Midnight Drive",
-		artist: "Neon Pulse",
-		duration: "3:42",
-		bpm: 124,
-		key: "Am",
-		color: "#1DB954",
-	},
-	{
-		id: "t2",
-		title: "Sunset Boulevard",
-		artist: "Wave Theory",
-		duration: "4:15",
-		bpm: 128,
-		key: "Cm",
-		color: "#6366f1",
-	},
-	{
-		id: "t3",
-		title: "Deep Blue",
-		artist: "Aqua Drift",
-		duration: "5:01",
-		bpm: 120,
-		key: "Fm",
-		color: "#f59e0b",
-	},
+export interface Playlist {
+	id: string;
+	name: string;
+	color: string;
+	items: QueueItem[];
+	createdAt: number;
+}
+
+export const TRACK_COLORS = [
+	"#1DB954", "#6366f1", "#f59e0b", "#ef4444",
+	"#06b6d4", "#8b5cf6", "#ec4899", "#10b981",
 ];
 
-export const mockQueue: QueueItem[] = [
-	{
-		id: "q1",
-		fromTrack: mockTracks[0],
-		toTrack: mockTracks[1],
-		status: "completed",
-		transitionDuration: 8,
-		fromBpm: 124,
-		toBpm: 128,
-	},
+export const PLAYLIST_COLORS = [
+	"#1DB954", "#6366f1", "#f59e0b", "#ef4444",
+	"#06b6d4", "#8b5cf6", "#ec4899", "#f97316",
 ];
+
+export function formatDuration(totalSeconds: number): string {
+	const m = Math.floor(totalSeconds / 60);
+	const s = Math.floor(totalSeconds % 60);
+	return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+export function stringToColor(str: string): string {
+	let hash = 0;
+	for (let i = 0; i < str.length; i++) {
+		hash = str.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	return TRACK_COLORS[Math.abs(hash) % TRACK_COLORS.length];
+}
