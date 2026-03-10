@@ -15,12 +15,32 @@ class AudioSeparator:
         self.n_fft = N_FFT
     
     def separate_harmonic_percussive(self, audio: np.ndarray) -> tuple:
+        """
+        Sépare un signal en composantes harmonique (mélodie/accords) 
+        et percussive (drums/rythme).
+        
+        Args:
+            audio: Signal audio
+            
+        Returns:
+            tuple: (harmonique, percussive)
+        """
+        # Utiliser la méthode HPSS de librosa
         harmonic, percussive = librosa.effects.hpss(audio)
         
         return harmonic, percussive
     
     def extract_bass(self, audio: np.ndarray, cutoff: int = 250) -> np.ndarray:
+        """
+        Extrait les basses fréquences.
         
+        Args:
+            audio: Signal audio
+            cutoff: Fréquence de coupure en Hz
+            
+        Returns:
+            np.ndarray: Composante basse
+        """
         from scipy.signal import butter, filtfilt
         
         # Filtre passe-bas
@@ -33,7 +53,16 @@ class AudioSeparator:
         return bass
     
     def extract_highs(self, audio: np.ndarray, cutoff: int = 2000) -> np.ndarray:
+        """
+        Extrait les hautes fréquences.
         
+        Args:
+            audio: Signal audio
+            cutoff: Fréquence de coupure en Hz
+            
+        Returns:
+            np.ndarray: Composante aigus
+        """
         from scipy.signal import butter, filtfilt
         
         nyquist = self.sample_rate / 2
@@ -45,7 +74,17 @@ class AudioSeparator:
         return highs
     
     def extract_mids(self, audio: np.ndarray, low: int = 250, high: int = 2000) -> np.ndarray:
+        """
+        Extrait les fréquences médiums.
         
+        Args:
+            audio: Signal audio
+            low: Fréquence basse en Hz
+            high: Fréquence haute en Hz
+            
+        Returns:
+            np.ndarray: Composante médiums
+        """
         from scipy.signal import butter, filtfilt
         
         nyquist = self.sample_rate / 2
@@ -58,7 +97,15 @@ class AudioSeparator:
         return mids
     
     def full_separation(self, audio: np.ndarray) -> dict:
+        """
+        Séparation complète en toutes les composantes.
         
+        Args:
+            audio: Signal audio
+            
+        Returns:
+            dict: Toutes les composantes
+        """
         harmonic, percussive = self.separate_harmonic_percussive(audio)
         
         return {

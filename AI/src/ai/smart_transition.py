@@ -625,7 +625,7 @@ class LoopFinder:
 
 
 class SmartTransitionGenerator:
-    def __init__(self, sample_rate=SAMPLE_RATE, model_path="models/params_vae.pth", claude_api_key=None):
+    def __init__(self, sample_rate=SAMPLE_RATE, model_path="models/params_vae.pth"):
         self.sample_rate = sample_rate
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.separator = AudioSeparator(sample_rate)
@@ -639,19 +639,8 @@ class SmartTransitionGenerator:
         self.circle_of_fifths = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F']
         self.model = None
         self.model_loaded = False
-        self.claude_advisor = None
         if MODEL_AVAILABLE and os.path.exists(model_path):
             self._load_model(model_path)
-        if claude_api_key:
-            self._load_claude(claude_api_key)
-
-    def _load_claude(self, api_key: str):
-        try:
-            from src.ai.claude_advisor import ClaudeTransitionAdvisor
-            self.claude_advisor = ClaudeTransitionAdvisor(api_key)
-            print("  [OK] Claude Advisor loaded")
-        except Exception as e:
-            print(f"  [!] Claude Advisor error: {e}")
 
     def _load_model(self, path):
         try:
@@ -872,348 +861,14 @@ class SmartTransitionGenerator:
             return arr[:length]
         return np.pad(arr, (0, length - len(arr)))
 
-    def _apply_hipass_sweep(self, audio, start_freq=80, end_freq=3500):
-        """High-pass sweep: progressively removes bass from start_freq to end_freq."""
-        n = len(audio)
-        output = np.zeros(n)
-        n_seg = 40
-        seg_len = max(1, n // n_seg)
-        for i in range(n_seg):
-            s = i * seg_len
-            e = min((i + 1) * seg_len, n)
-            t = i / max(n_seg - 1, 1)
-            freq = start_freq * ((end_freq / start_freq) ** t)
-            freq = max(60, min(freq, self.sample_rate / 2 - 200))
-            try:
-                b, a = butter(3, freq / (self.sample_rate / 2), btype='high')
-                output[s:e] = filtfilt(b, a, audio[s:e])
-            except Exception:
-                output[s:e] = audio[s:e]
-        if n_seg * seg_len < n:
-            output[n_seg * seg_len:] = audio[n_seg * seg_len:]
-        return output
-
-    def _apply_white_noise_riser(self, length, tempo):
-        """White noise riser swept from low to high frequencies."""
-        noise = np.random.randn(length) * 0.03
-        return self._apply_filter_sweep(noise, 150, 14000)
-
-    def _apply_spinback_effect(self, audio):
-        """Simulates vinyl spinback: reverses + accelerates audio then fades out."""
-        n = len(audio)
-        if n < 1000:
-            return audio * np.linspace(1, 0, n)
-        reversed_audio = audio[::-1]
-        try:
-            fast = librosa.effects.time_stretch(reversed_audio, rate=3.0)
-        except Exception:
-            fast = reversed_audio[::3]
-        result = np.zeros(n)
-        spinback_len = min(len(fast), n)
-        result[:spinback_len] = fast[:spinback_len]
-        fade = np.linspace(1.0, 0.0, n) ** 0.5
-        return result * fade
-
-    def _select_auto_style(self, harm_score, bpm_diff, analysis1=None, analysis2=None):
-        """Auto-selects the best transition style based on harmonic/tempo analysis."""
-        tempo1 = analysis1['tempo'] if analysis1 else 120.0
-        tempo2 = analysis2['tempo'] if analysis2 else 120.0
-        avg_tempo = (tempo1 + tempo2) / 2
-
-        # Perfect or relative harmony → elegant harmonic blend
-        if harm_score >= 0.75:
-            return 'harmonic'
-        # High BPM + decent harmony → energetic drop
-        if avg_tempo >= 118 and harm_score >= 0.45 and bpm_diff < 15:
-            return 'drop'
-        # Adjacent harmony → smooth professional crossfade
-        if harm_score >= 0.45:
-            return 'smooth'
-        # Key clash + large BPM diff → dramatic spinback
-        if bpm_diff > 12 and harm_score < 0.4:
-            return 'spinback'
-        # Key clash → echo/reverb to disguise the clash
-        if harm_score < 0.4:
-            return 'echo'
-        return 'smooth'
-
-    def _mix_smooth(self, comps, length, p, tempo, harmony_score, bar_samples):
-        """Professional smooth crossfade with EQ sweeps and filter transitions."""
-        t = np.linspace(0, 1, length)
-
-        # S-curve crossfade in the 20%-80% window
-        t_cf = np.clip((t - 0.20) / 0.60, 0, 1)
-        curve_out = np.cos(t_cf * np.pi / 2) ** 2
-        curve_in = np.sin(t_cf * np.pi / 2) ** 2
-
-        # Bass swap at bar-aligned midpoint
-        bass_swap = (int(length * 0.50) // bar_samples) * bar_samples
-        bass_swap = max(bar_samples, min(bass_swap, length - bar_samples))
-        swap_len = min(bar_samples, length - bass_swap)
-
-        low_mix = np.zeros(length)
-        low_mix[:bass_swap] = comps['a_bass'][:bass_swap]
-        if swap_len > 0:
-            sw_t = np.linspace(0, 1, swap_len)
-            low_mix[bass_swap:bass_swap + swap_len] = (
-                comps['a_bass'][bass_swap:bass_swap + swap_len] * np.cos(sw_t * np.pi / 2) +
-                comps['b_bass'][bass_swap:bass_swap + swap_len] * np.sin(sw_t * np.pi / 2)
-            )
-        if bass_swap + swap_len < length:
-            low_mix[bass_swap + swap_len:] = comps['b_bass'][bass_swap + swap_len:]
-
-        mid_eq_out = np.linspace(1.0, 10 ** (p['mid_eq_1'] / 20), length)
-        mid_eq_in = np.linspace(10 ** (p['mid_eq_2'] / 20), 1.0, length)
-        mid_mix = comps['a_mids'] * mid_eq_out * curve_out + comps['b_mids'] * mid_eq_in * curve_in
-
-        # Highs: lowpass closes on A, highpass opens on B
-        a_highs_lp = self._apply_filter_sweep(comps['a_highs'], 12000, 800)
-        b_highs_hp = self._apply_filter_sweep(comps['b_highs'], 800, 12000)
-        high_mix = a_highs_lp * curve_out + b_highs_hp * curve_in
-
-        harm_blend = max(0.25, harmony_score * 0.45)
-        harm_mix = (comps['a_harmonic'] * curve_out + comps['b_harmonic'] * curve_in) * harm_blend
-
-        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
-
-        # Reverb tail on A from 65% onwards
-        rev_start = int(length * 0.65)
-        if rev_start < length:
-            tail = mix[rev_start:].copy()
-            tail_rev = self._apply_reverb(tail, 0.20)
-            rev_env = np.linspace(0, 1, len(tail)) ** 1.5 * 0.30
-            mix[rev_start:] = tail * (1 - rev_env) + tail_rev * rev_env
-
-        return mix
-
-    def _mix_drop(self, comps, length, p, tempo, harmony_score, bar_samples):
-        """EDM drop: white noise riser + progressive bass removal + hard cut to B."""
-        t = np.linspace(0, 1, length)
-
-        # Drop point aligned to bar (~65%)
-        drop_sample = (int(length * 0.65) // bar_samples) * bar_samples
-        drop_sample = max(bar_samples, min(drop_sample, length - bar_samples))
-        drop_t = drop_sample / length
-        blend_width = max(bar_samples / length, 0.08)
-
-        curve_a = np.ones(length)
-        after_drop = t > drop_t
-        if np.any(after_drop):
-            curve_a[after_drop] = np.maximum(0.0, 1.0 - (t[after_drop] - drop_t) / blend_width)
-
-        curve_b = np.zeros(length)
-        if np.any(after_drop):
-            curve_b[after_drop] = np.minimum(1.0, (t[after_drop] - drop_t) / blend_width)
-
-        harm_blend = max(0.25, harmony_score * 0.45)
-
-        # A's bass progressively hi-passed from 30% to drop (tension build)
-        build_start = int(length * 0.30)
-        build_len = drop_sample - build_start
-        a_bass_mixed = comps['a_bass'].copy()
-        if build_len > 100:
-            a_bass_hp = self._apply_hipass_sweep(comps['a_bass'][build_start:drop_sample], 60, 2500)
-            blend_ramp = np.linspace(0, 1, build_len)
-            a_bass_mixed[build_start:drop_sample] = (
-                comps['a_bass'][build_start:drop_sample] * (1 - blend_ramp) +
-                a_bass_hp * blend_ramp
-            )
-
-        low_mix = a_bass_mixed * curve_a + comps['b_bass'] * curve_b
-        mid_mix = comps['a_mids'] * curve_a + comps['b_mids'] * curve_b
-        high_mix = comps['a_highs'] * curve_a + comps['b_highs'] * curve_b
-        harm_mix = (comps['a_harmonic'] * curve_a + comps['b_harmonic'] * curve_b) * harm_blend
-
-        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
-
-        # White noise riser: builds from 25% to drop point
-        riser = self._apply_white_noise_riser(length, tempo)
-        riser_env = np.zeros(length)
-        riser_mask = (t >= 0.25) & (t <= drop_t + 0.02)
-        if np.any(riser_mask):
-            ramp = np.linspace(0, 1, np.sum(riser_mask))
-            riser_env[riser_mask] = ramp ** 2
-        mix += riser * riser_env
-
-        # Beat stutter on percussives 2 bars before drop
-        stutter_start = max(0, drop_sample - 2 * bar_samples)
-        beat_len = bar_samples // 2
-        if drop_sample > stutter_start + beat_len and beat_len > 0:
-            last_beat = comps['a_percussive'][drop_sample - beat_len:drop_sample].copy()
-            for rep in range(3):
-                vol = 0.6 * (0.5 ** rep)
-                s = drop_sample - beat_len * (rep + 1)
-                e = drop_sample - beat_len * rep
-                if s >= stutter_start and s >= 0 and e <= length:
-                    mix[s:e] += last_beat[:e - s] * vol * 0.18
-
-        return mix
-
-    def _mix_echo(self, comps, length, p, tempo, harmony_score, bar_samples):
-        """Echo throw + reverb wash: disguises key clashes with depth effects."""
-        t = np.linspace(0, 1, length)
-
-        b_enter_t = 0.50
-        b_full_t = 0.85
-        t_cf = np.clip((t - b_enter_t) / (b_full_t - b_enter_t), 0, 1)
-        curve_out = np.cos(t_cf * np.pi / 2) ** 2
-        curve_in = np.sin(t_cf * np.pi / 2) ** 2
-
-        harm_blend = max(0.25, harmony_score * 0.45)
-
-        # Bass swap around the echo midpoint
-        bass_swap = (int(length * 0.55) // bar_samples) * bar_samples
-        bass_swap = max(bar_samples, min(bass_swap, length - bar_samples))
-        swap_len = min(bar_samples, length - bass_swap)
-
-        low_mix = np.zeros(length)
-        low_mix[:bass_swap] = comps['a_bass'][:bass_swap]
-        if swap_len > 0:
-            sw_t = np.linspace(0, 1, swap_len)
-            low_mix[bass_swap:bass_swap + swap_len] = (
-                comps['a_bass'][bass_swap:bass_swap + swap_len] * np.cos(sw_t * np.pi / 2) +
-                comps['b_bass'][bass_swap:bass_swap + swap_len] * np.sin(sw_t * np.pi / 2)
-            )
-        if bass_swap + swap_len < length:
-            low_mix[bass_swap + swap_len:] = comps['b_bass'][bass_swap + swap_len:]
-
-        mid_mix = comps['a_mids'] * curve_out + comps['b_mids'] * curve_in
-        high_mix = comps['a_highs'] * curve_out + comps['b_highs'] * curve_in
-        harm_mix = (comps['a_harmonic'] * curve_out + comps['b_harmonic'] * curve_in) * harm_blend
-
-        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
-
-        # Echo throw starting at 38%
-        mix_with_echo = self._apply_echo(mix, 0.38, tempo)
-        echo_env = np.zeros(length)
-        em = t >= 0.38
-        if np.any(em):
-            echo_env[em] = np.minimum(1.0, (t[em] - 0.38) / 0.35)
-        # Fade echo after B is established
-        after_full = t > b_full_t
-        if np.any(after_full):
-            echo_env[after_full] = np.maximum(0.0, 1.0 - (t[after_full] - b_full_t) / 0.10)
-        mix = mix * (1.0 - echo_env * 0.50) + mix_with_echo * echo_env * 0.50
-
-        # Reverb wash in blend zone (50%–85%)
-        rev_start = int(b_enter_t * length)
-        rev_end = int(b_full_t * length)
-        if rev_end > rev_start:
-            rev_section = mix[rev_start:rev_end].copy()
-            rev_applied = self._apply_reverb(rev_section, 0.30)
-            t_rev = np.linspace(0, 1, rev_end - rev_start)
-            rev_amount = np.sin(t_rev * np.pi) * 0.28
-            mix[rev_start:rev_end] = (
-                rev_section * (1 - rev_amount) + rev_applied[:rev_end - rev_start] * rev_amount
-            )
-
-        return mix
-
-    def _mix_spinback(self, comps, length, p, tempo, harmony_score, bar_samples):
-        """Vinyl spinback: A plays clean, spins back, B enters clean."""
-        t = np.linspace(0, 1, length)
-        harm_blend = max(0.25, harmony_score * 0.45)
-
-        sb_sample = (int(length * 0.65) // bar_samples) * bar_samples
-        sb_sample = max(bar_samples, min(sb_sample, length - 2 * bar_samples))
-        nt_sample = min(sb_sample + 2 * bar_samples, length - bar_samples // 2)
-
-        a_full = (comps['a_bass'] * 0.35 + comps['a_mids'] * 0.28 +
-                  comps['a_highs'] * 0.17 + comps['a_harmonic'] * 0.20 * harm_blend)
-        b_full = (comps['b_bass'] * 0.35 + comps['b_mids'] * 0.28 +
-                  comps['b_highs'] * 0.17 + comps['b_harmonic'] * 0.20 * harm_blend)
-
-        mix = np.zeros(length)
-        mix[:sb_sample] = a_full[:sb_sample]
-
-        if nt_sample > sb_sample:
-            spinback_audio = a_full[sb_sample:nt_sample]
-            mix[sb_sample:nt_sample] = self._apply_spinback_effect(spinback_audio)
-
-        if nt_sample < length:
-            b_section = b_full[nt_sample:]
-            fade_in = np.linspace(0, 1, len(b_section)) ** 0.4
-            mix[nt_sample:] = b_section * fade_in
-
-        return mix
-
-    def _mix_harmonic(self, comps, length, p, tempo, harmony_score, bar_samples):
-        """Deep harmonic blend for harmonically compatible tracks with reverb wash."""
-        t = np.linspace(0, 1, length)
-
-        # Wide, slow cosine crossfade (15%–85%)
-        t_cf = np.clip((t - 0.15) / 0.70, 0, 1)
-        curve_out = 0.5 * (1 + np.cos(t_cf * np.pi))
-        curve_in = 1.0 - curve_out
-
-        # Bass swap at bar-aligned midpoint
-        bass_swap = (int(length * 0.50) // bar_samples) * bar_samples
-        bass_swap = max(bar_samples, min(bass_swap, length - bar_samples))
-        swap_len = min(bar_samples, length - bass_swap)
-
-        low_mix = np.zeros(length)
-        low_mix[:bass_swap] = comps['a_bass'][:bass_swap]
-        if swap_len > 0:
-            sw_t = np.linspace(0, 1, swap_len)
-            low_mix[bass_swap:bass_swap + swap_len] = (
-                comps['a_bass'][bass_swap:bass_swap + swap_len] * np.cos(sw_t * np.pi / 2) +
-                comps['b_bass'][bass_swap:bass_swap + swap_len] * np.sin(sw_t * np.pi / 2)
-            )
-        if bass_swap + swap_len < length:
-            low_mix[bass_swap + swap_len:] = comps['b_bass'][bass_swap + swap_len:]
-
-        # Filter sweeps on highs for smoother blend
-        a_highs_lp = self._apply_filter_sweep(comps['a_highs'], 14000, 1200)
-        b_highs_hp = self._apply_filter_sweep(comps['b_highs'], 1200, 14000)
-        high_mix = a_highs_lp * curve_out + b_highs_hp * curve_in
-
-        mid_mix = comps['a_mids'] * curve_out + comps['b_mids'] * curve_in
-
-        # Harmonic content with subtle reverb for smooth blending
-        harm_blend = max(0.35, harmony_score * 0.55)
-        a_harm_rev = self._apply_reverb(comps['a_harmonic'], 0.14)
-        b_harm_rev = self._apply_reverb(comps['b_harmonic'], 0.14)
-        harm_mix = (a_harm_rev * curve_out + b_harm_rev * curve_in) * harm_blend
-
-        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
-
-        # Bell-shaped reverb wash across the blend zone
-        mix_rev = self._apply_reverb(mix, 0.10)
-        rev_env = np.sin(t_cf * np.pi) * 0.20
-        mix = mix * (1 - rev_env) + mix_rev * rev_env
-
-        return mix
-
-    def _mix_loops(self, comp1, comp2, length, p, tempo, harmony_score, style='smooth', bpm_diff=0.0):
-        """Routes to the appropriate style-specific mixing method."""
-        beat_samples = int(60 / max(tempo, 60) * self.sample_rate)
-        bar_samples = max(beat_samples * 4, 1)
-
-        # Resize all stems to transition length
-        comps = {}
-        for key in ['full', 'harmonic', 'percussive', 'bass', 'mids', 'highs']:
-            comps[f'a_{key}'] = self._resize(comp1[key], length)
-            comps[f'b_{key}'] = self._resize(comp2[key], length)
-
-        if style == 'drop':
-            return self._mix_drop(comps, length, p, tempo, harmony_score, bar_samples)
-        elif style == 'echo':
-            return self._mix_echo(comps, length, p, tempo, harmony_score, bar_samples)
-        elif style == 'spinback':
-            return self._mix_spinback(comps, length, p, tempo, harmony_score, bar_samples)
-        elif style == 'harmonic':
-            return self._mix_harmonic(comps, length, p, tempo, harmony_score, bar_samples)
-        else:
-            return self._mix_smooth(comps, length, p, tempo, harmony_score, bar_samples)
-
     def generate_transition(self, audio1, audio2, duration=20.0, style='auto'):
         print("\n" + "=" * 60)
         print("  DJ TRANSITION GENERATOR - PROFESSIONAL EDITION")
         print("=" * 60)
-
+        
         analysis1 = self.analyze_track(audio1, "TRACK A")
         analysis2 = self.analyze_track(audio2, "TRACK B")
-
+        
         print("\n  === HARMONIC COMPATIBILITY ===")
         harm_score, harm_type, harm_desc = self.harmonic_mixer.check_compatibility(
             analysis1['key'], analysis1['mode'],
@@ -1222,100 +877,49 @@ class SmartTransitionGenerator:
         print(f"  {analysis1['camelot']} -> {analysis2['camelot']}")
         print(f"  Compatibility: {harm_type.upper()} ({harm_score:.0%})")
         print(f"  {harm_desc}")
-
+        
         p = self._get_ai_params(audio1, audio2)
-
+        
         tempo1, tempo2 = analysis1['tempo'], analysis2['tempo']
         avg_tempo = (tempo1 + tempo2) / 2
         bpm_diff = abs(tempo1 - tempo2) / avg_tempo * 100
-
+        
         print(f"\n  === TEMPO SYNC ===")
         print(f"  Track A: {tempo1:.1f} BPM")
         print(f"  Track B: {tempo2:.1f} BPM")
         print(f"  Difference: {bpm_diff:.1f}%")
         if bpm_diff > 3:
             print(f"  -> Time-stretch required")
-
-        # ------------------------------------------------------------------
-        # Décision Claude (si disponible)
-        # ------------------------------------------------------------------
-        claude_decision = None
-        if self.claude_advisor is not None:
-            print(f"\n  === CLAUDE AI ADVISOR ===")
-            try:
-                vocal_curve1 = self.vocal_detector.detect_vocals_curve(audio1)
-                vocal_curve2 = self.vocal_detector.detect_vocals_curve(audio2)
-                claude_decision = self.claude_advisor.advise(
-                    analysis1, analysis2,
-                    vocal_curve1, vocal_curve2,
-                    self.sample_rate
-                )
-                print(f"  Confidence: {claude_decision['confidence']:.0%}")
-                print(f"  Style choisi: {claude_decision['style']}")
-                print(f"  Raison: {claude_decision['reasoning']}")
-                # Appliquer le style recommandé par Claude
-                if style == 'auto':
-                    style = claude_decision['style']
-                # Appliquer les ajustements EQ au params VAE
-                eq = claude_decision['eq_adjustments']
-                p['bass_swap_beat'] = eq['bass_swap_position']
-                p['filter_sweep'] = eq['filter_sweep']
-            except Exception as e:
-                print(f"  [!] Claude advisor error: {e}")
-                claude_decision = None
-
+        
         n_bars = 8 if p['transition_beats'] >= 32 else 4
-
+        
         print(f"\n  === LOOP DETECTION ===")
         print(f"  Target: {n_bars} bars")
-
-        if claude_decision is not None:
-            # Utiliser les points de coupe décidés par Claude
-            print(f"\n  Track A - Claude cut point: {claude_decision['cut_point_track1']:.1f}s")
-            loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_best_loop(
-                audio1,
-                target_time=claude_decision['cut_point_track1'],
-                n_bars=n_bars,
-                search_range=20.0,
-                position='outro'
-            )
-            print(f"    Snap to bar: {loop1_start:.1f}s - {loop1_end:.1f}s | Vocals: {'YES' if has_v1 else 'NO'}")
-
-            print(f"\n  Track B - Claude start point: {claude_decision['start_point_track2']:.1f}s")
-            loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_best_loop(
-                audio2,
-                target_time=claude_decision['start_point_track2'],
-                n_bars=n_bars,
-                search_range=20.0,
-                position='intro'
-            )
-            print(f"    Snap to bar: {loop2_start:.1f}s - {loop2_end:.1f}s | Vocals: {'YES' if has_v2 else 'NO'}")
-        else:
-            # Fallback : détection automatique classique
-            print(f"\n  Track A - Finding outro loop...")
-            loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_outro_loop(audio1, n_bars=n_bars)
-            print(f"    Position: {loop1_start:.1f}s - {loop1_end:.1f}s ({loop1_end - loop1_start:.1f}s)")
-            print(f"    Vocals: {'YES' if has_v1 else 'NO'}")
-            print(f"    Criteria: {', '.join(reasons1[:4])}")
-
-            if has_v1:
-                print(f"    -> Searching alternative breakdown...")
-                loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_breakdown_loop(audio1, n_bars=n_bars)
-                print(f"    New: {loop1_start:.1f}s - {loop1_end:.1f}s | Vocals: {'YES' if has_v1 else 'NO'}")
-
-            print(f"\n  Track B - Finding intro loop...")
-            loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_intro_loop(audio2, n_bars=n_bars)
-            print(f"    Position: {loop2_start:.1f}s - {loop2_end:.1f}s ({loop2_end - loop2_start:.1f}s)")
-            print(f"    Vocals: {'YES' if has_v2 else 'NO'}")
-            print(f"    Criteria: {', '.join(reasons2[:4])}")
-
-            if has_v2:
-                print(f"    -> Searching alternative breakdown...")
-                loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_breakdown_loop(audio2, n_bars=n_bars)
-                print(f"    New: {loop2_start:.1f}s - {loop2_end:.1f}s | Vocals: {'YES' if has_v2 else 'NO'}")
-
+        
+        print(f"\n  Track A - Finding outro loop...")
+        loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_outro_loop(audio1, n_bars=n_bars)
+        print(f"    Position: {loop1_start:.1f}s - {loop1_end:.1f}s ({loop1_end - loop1_start:.1f}s)")
+        print(f"    Vocals: {'YES' if has_v1 else 'NO'}")
+        print(f"    Criteria: {', '.join(reasons1[:4])}")
+        
+        if has_v1:
+            print(f"    -> Searching alternative breakdown...")
+            loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_breakdown_loop(audio1, n_bars=n_bars)
+            print(f"    New: {loop1_start:.1f}s - {loop1_end:.1f}s | Vocals: {'YES' if has_v1 else 'NO'}")
+        
+        print(f"\n  Track B - Finding intro loop...")
+        loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_intro_loop(audio2, n_bars=n_bars)
+        print(f"    Position: {loop2_start:.1f}s - {loop2_end:.1f}s ({loop2_end - loop2_start:.1f}s)")
+        print(f"    Vocals: {'YES' if has_v2 else 'NO'}")
+        print(f"    Criteria: {', '.join(reasons2[:4])}")
+        
+        if has_v2:
+            print(f"    -> Searching alternative breakdown...")
+            loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_breakdown_loop(audio2, n_bars=n_bars)
+            print(f"    New: {loop2_start:.1f}s - {loop2_end:.1f}s | Vocals: {'YES' if has_v2 else 'NO'}")
+        
         trans_beats = p['transition_beats']
-        trans_dur = claude_decision['transition_duration'] if claude_decision else (trans_beats / avg_tempo) * 60
+        trans_dur = (trans_beats / avg_tempo) * 60
         trans_dur = max(12, min(trans_dur, 48))
         
         print(f"\n  === TRANSITION BUILD ===")
@@ -1342,13 +946,8 @@ class SmartTransitionGenerator:
         comp1 = self.separator.full_separation(loop1_audio)
         comp2 = self.separator.full_separation(loop2_audio)
         
-        # Auto-select style based on track analysis
-        if style == 'auto':
-            style = self._select_auto_style(harm_score, bpm_diff, analysis1, analysis2)
-            print(f"  Style auto-selected: {style.upper()}")
-
-        print(f"  Mixing with EQ and effects ({style})...")
-        transition = self._mix_loops(comp1, comp2, n_samples, p, avg_tempo, harm_score, style, bpm_diff)
+        print(f"  Mixing with EQ and effects...")
+        transition = self._mix_loops(comp1, comp2, n_samples, p, avg_tempo, harm_score)
         
         peak = np.max(np.abs(transition))
         if peak > 0:
@@ -1385,7 +984,84 @@ class SmartTransitionGenerator:
                     'description': harm_desc
                 }
             },
-            'params': p,
-            'claude_decision': claude_decision,
+            'params': p
         }
 
+    def _mix_loops(self, comp1, comp2, length, p, tempo, harmony_score):
+        t = np.linspace(0, 1, length)
+        
+        cf_type = p['crossfade_type']
+        if cf_type == 0:
+            curve_out = 1 - t
+            curve_in = t
+        elif cf_type == 1:
+            curve_out = np.cos(t * np.pi / 2) ** 2
+            curve_in = np.sin(t * np.pi / 2) ** 2
+        else:
+            curve_out = (1 - t) ** 1.5
+            curve_in = t ** 1.5
+        
+        beat_samples = int(60 / tempo * self.sample_rate)
+        bar_samples = beat_samples * 4
+        
+        low1 = self._resize(comp1['bass'], length)
+        mid1 = self._resize(comp1['mids'], length)
+        high1 = self._resize(comp1['highs'], length)
+        harm1 = self._resize(comp1['harmonic'], length)
+        
+        low2 = self._resize(comp2['bass'], length)
+        mid2 = self._resize(comp2['mids'], length)
+        high2 = self._resize(comp2['highs'], length)
+        harm2 = self._resize(comp2['harmonic'], length)
+        
+        bass_swap = int(length * p['bass_swap_beat'])
+        bass_swap = (bass_swap // bar_samples) * bar_samples
+        bass_swap = max(bar_samples, min(bass_swap, length - bar_samples))
+        
+        low_mix = np.zeros(length)
+        low_mix[:bass_swap] = low1[:bass_swap]
+        
+        swap_len = min(bar_samples, length - bass_swap)
+        if swap_len > 0:
+            swap_t = np.linspace(0, 1, swap_len)
+            swap_out = np.cos(swap_t * np.pi / 2)
+            swap_in = np.sin(swap_t * np.pi / 2)
+            low_mix[bass_swap:bass_swap + swap_len] = (
+                low1[bass_swap:bass_swap + swap_len] * swap_out +
+                low2[bass_swap:bass_swap + swap_len] * swap_in
+            )
+        
+        if bass_swap + swap_len < length:
+            low_mix[bass_swap + swap_len:] = low2[bass_swap + swap_len:]
+        
+        mid_eq1 = np.linspace(1, 10 ** (p['mid_eq_1'] / 20), length)
+        mid_eq2 = np.linspace(10 ** (p['mid_eq_2'] / 20), 1, length)
+        high_eq1 = np.linspace(1, 10 ** (p['high_eq_1'] / 20), length)
+        high_eq2 = np.linspace(10 ** (p['high_eq_2'] / 20), 1, length)
+        
+        mid_mix = mid1 * mid_eq1 * curve_out + mid2 * mid_eq2 * curve_in
+        high_mix = high1 * high_eq1 * curve_out + high2 * high_eq2 * curve_in
+        
+        harm_blend = max(0.25, harmony_score * 0.45)
+        if p['filter_sweep'] > 0.3:
+            harm1_f = self._apply_filter_sweep(harm1, 5500, 280)
+            harm2_f = self._apply_filter_sweep(harm2, 280, 5500)
+            harm_mix = harm1_f * curve_out * harm_blend + harm2_f * curve_in * harm_blend
+        else:
+            harm_mix = harm1 * curve_out * harm_blend + harm2 * curve_in * harm_blend
+        
+        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
+        
+        tension = p['tension_effect']
+        if tension == 1:
+            mix = self._apply_echo(mix, 0.22, tempo)
+        elif tension == 2:
+            rev_curve = np.sin(t * np.pi)
+            mix_rev = self._apply_reverb(mix, 0.32)
+            mix = mix * (1 - rev_curve * 0.18) + mix_rev * rev_curve * 0.18
+        elif tension == 3:
+            noise = np.random.randn(length) * 0.004
+            noise = self._apply_filter_sweep(noise, 90, 1600)
+            mix = mix + noise * (t ** 2.5) * 0.035
+        
+        return mix

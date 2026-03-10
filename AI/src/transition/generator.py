@@ -9,18 +9,14 @@ from src.utils.config import SAMPLE_RATE
 
 
 class TransitionGenerator:
-    def __init__(self, sample_rate=SAMPLE_RATE, claude_api_key=None):
+    def __init__(self, sample_rate=SAMPLE_RATE):
         self.sample_rate = sample_rate
         self.loader = AudioLoader(sample_rate)
         self.exporter = AudioExporter(sample_rate)
         self.feature_extractor = FeatureExtractor(sample_rate)
         self.beat_detector = BeatDetector(sample_rate)
         self.key_analyzer = KeyAnalyzer(sample_rate)
-        self.ai_generator = SmartTransitionGenerator(sample_rate, claude_api_key=claude_api_key)
-
-    def set_claude_key(self, api_key: str):
-        """Active ou change la clé Claude API à la volée."""
-        self.ai_generator._load_claude(api_key)
+        self.ai_generator = SmartTransitionGenerator(sample_rate)
 
     def generate_transition(self, track1_path, track2_path, transition_duration=20.0,
                            output_path=None, style='auto', overlap_duration=3.5):
