@@ -22,7 +22,8 @@ class TransitionRequest(BaseModel):
     track2_filename: str
     transition_duration: float = 15.0
     overlap_duration: float = 3.0
-    style: Literal['smooth', 'drop', 'echo'] = 'smooth'
+    style: Literal['smooth', 'drop', 'echo', 'harmonic', 'spinback', 'auto'] = 'auto'
+    claude_api_key: Optional[str] = None  # Clé API Anthropic pour activer Claude Advisor
 
 
 class TransitionResponse(BaseModel):
@@ -36,6 +37,9 @@ class TransitionResponse(BaseModel):
     track2_analysis: Optional[TrackAnalysis] = None
     style: Optional[str] = None
     quality_info: Optional[str] = None
+    claude_used: Optional[bool] = None
+    claude_reasoning: Optional[str] = None
+    claude_confidence: Optional[float] = None
 
 
 class AnalyzeRequest(BaseModel):

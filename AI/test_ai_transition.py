@@ -16,5 +16,5 @@ result = generator.generate_transition(
     overlap_duration=5.0        
 )
 
-print(f"\n🎧 Écoutez: data/output/mix_transition_pro.wav")
-print(f"   Durée totale: {result['duration']:.2f}s")
+print(f"Écoutez: data/output/mix_transition_pro.wav")
+print(f"Durée totale: {result['duration']:.2f}s")

@@ -132,9 +132,13 @@ async def generate_transition(request: TransitionRequest):
     try:
         output_filename = f"transition_{uuid.uuid4().hex}.wav"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
-        
+
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
+
+        # Activer Claude Advisor si une clé est fournie
+        if request.claude_api_key:
+            generator.set_claude_key(request.claude_api_key)
+
         # Générer la transition
         result = generator.generate_transition(
             track1_path,
@@ -223,19 +227,34 @@ async def get_styles():
     return {
         "styles": [
             {
+                "id": "auto",
+                "name": "Auto",
+                "description": "Sélection automatique selon l'analyse harmonique et BPM"
+            },
+            {
                 "id": "smooth",
                 "name": "Smooth",
-                "description": "Transition douce et progressive avec filtres"
+                "description": "Crossfade EQ progressif avec LPF/HPF sweep — style DJ professionnel"
             },
             {
                 "id": "drop",
                 "name": "Drop",
-                "description": "Build-up puis drop style EDM"
+                "description": "White noise riser + beat stutter + hard drop style EDM"
             },
             {
                 "id": "echo",
                 "name": "Echo",
-                "description": "Dissolution dans l'écho et réverb"
+                "description": "Echo throw + reverb wash — idéal pour masquer les clashes harmoniques"
+            },
+            {
+                "id": "harmonic",
+                "name": "Harmonic",
+                "description": "Blend harmonique profond avec reverb — pour clés compatibles"
+            },
+            {
+                "id": "spinback",
+                "name": "Spinback",
+                "description": "Effet vinyle spinback + entrée nette — pour grands écarts de BPM"
             }
         ]
     }
