@@ -5,16 +5,12 @@ import os
 from scipy.signal import butter, filtfilt, medfilt
 from scipy.ndimage import uniform_filter1d
 
-from src.ai.audio_separator import AudioSeparator
 from src.analysis.feature_extractor import FeatureExtractor
 from src.analysis.key_analyzer import KeyAnalyzer
 from src.utils.config import SAMPLE_RATE
 
-try:
-    from src.ai.transition_params_model import TransitionParamsVAE
-    MODEL_AVAILABLE = True
-except ImportError:
-    MODEL_AVAILABLE = False
+from src.ai.mel_encoder import MelEncoder, MelTransitionVAE, ENCODER_DIM
+from src.ai.audio_compatibility import AudioCompatibilityScorer
 
 
 CAMELOT_WHEEL = {
@@ -152,14 +148,6 @@ class VocalDetector:
             segment_scores = scores[start_frame:end_frame]
             return np.mean(segment_scores > threshold) > 0.22
         return False
-
-    def get_vocal_intensity(self, audio, time, window=1.5):
-        scores = self.detect_vocals_curve(audio)
-        center = int(time * self.sample_rate / self.hop_length)
-        half_win = int(window * self.sample_rate / self.hop_length / 2)
-        start = max(0, center - half_win)
-        end = min(len(scores), center + half_win)
-        return np.mean(scores[start:end]) if end > start else 0.5
 
 
 class StructureAnalyzer:
@@ -308,23 +296,15 @@ class StructureAnalyzer:
         start_sample = int(start_time * self.sample_rate)
         end_sample = int(end_time * self.sample_rate)
         segment = audio[start_sample:end_sample]
-        
+
         if len(segment) < self.sample_rate:
             return 0
-        
+
         rms = librosa.feature.rms(y=segment, hop_length=self.hop_length)[0]
         if len(rms) < 2:
             return 0
-        
-        rms_stability = 1.0 - min(np.std(rms) / (np.mean(rms) + 1e-8), 1.0)
-        
-        try:
-            tempo_curve = librosa.feature.tempogram(y=segment, sr=self.sample_rate)
-            tempo_stability = 1.0 - min(np.std(np.max(tempo_curve, axis=0)) / 10, 1.0)
-        except:
-            tempo_stability = 0.5
-        
-        return rms_stability * 0.6 + tempo_stability * 0.4
+
+        return 1.0 - min(np.std(rms) / (np.mean(rms) + 1e-8), 1.0)
 
 
 class PhraseDetector:
@@ -382,18 +362,6 @@ class PhraseDetector:
         
         return bars[idx]
 
-    def snap_to_phrase(self, phrases, target_time, direction='nearest'):
-        return self.snap_to_bar(phrases, target_time, direction)
-
-    def get_phrase_at_time(self, phrases, time):
-        if len(phrases) < 2:
-            return None
-        
-        for i in range(len(phrases) - 1):
-            if phrases[i] <= time < phrases[i + 1]:
-                return {'start': phrases[i], 'end': phrases[i + 1], 'index': i}
-        
-        return {'start': phrases[-1], 'end': phrases[-1] + (phrases[-1] - phrases[-2]), 'index': len(phrases) - 1}
 
 
 class HarmonicMixer:
@@ -443,11 +411,6 @@ class HarmonicMixer:
         else:
             return 0.25, 'clash', 'Key clash - avoid long blend'
 
-    def get_energy_boost_key(self, camelot):
-        num = int(camelot[:-1])
-        letter = camelot[-1]
-        new_num = ((num + 6) % 12) + 1
-        return f"{new_num}{letter}"
 
 
 class LoopFinder:
@@ -457,39 +420,57 @@ class LoopFinder:
         self.structure_analyzer = StructureAnalyzer(sample_rate)
         self.phrase_detector = PhraseDetector(sample_rate)
 
-    def score_loop(self, audio, start_time, end_time, beat_info, position='any'):
+    def score_loop(self, audio, start_time, end_time, beat_info, position='any',
+                   vocal_scores=None, perc_curve=None):
         score = 0
         reasons = []
-        
-        has_vocals = self.vocal_detector.has_vocals_in_range(audio, start_time, end_time, threshold=0.28)
+        hop = 512
+
+        if vocal_scores is not None:
+            sf = max(0, int(start_time * self.sample_rate / hop))
+            ef = min(len(vocal_scores), int(end_time * self.sample_rate / hop))
+            has_vocals = bool(np.mean(vocal_scores[sf:ef] > 0.45) > 0.40) if ef > sf else False
+        else:
+            has_vocals = self.vocal_detector.has_vocals_in_range(audio, start_time, end_time, threshold=0.45)
+
         if has_vocals:
             score -= 70
             reasons.append("VOCALS_DETECTED")
         else:
             score += 40
             reasons.append("NO_VOCALS")
-        
+
         stability = self.structure_analyzer.get_section_stability(audio, start_time, end_time)
         score += stability * 25
         reasons.append(f"STABILITY_{stability:.0%}")
-        
-        start_sample = int(start_time * self.sample_rate)
-        end_sample = int(end_time * self.sample_rate)
-        segment = audio[start_sample:end_sample]
-        
-        if len(segment) > self.sample_rate:
-            try:
-                _, percussive = librosa.effects.hpss(segment)
-                perc_ratio = np.sqrt(np.mean(percussive ** 2)) / (np.sqrt(np.mean(segment ** 2)) + 1e-8)
-                
-                if perc_ratio < 0.30:
-                    score += 22
-                    reasons.append("LOW_PERCUSSION")
-                elif perc_ratio < 0.45:
-                    score += 12
-                    reasons.append("MED_PERCUSSION")
-            except:
-                pass
+
+        if perc_curve is not None:
+            sf = max(0, int(start_time * self.sample_rate / hop))
+            ef = min(len(perc_curve), int(end_time * self.sample_rate / hop))
+            if ef > sf:
+                seg = audio[int(start_time * self.sample_rate):int(end_time * self.sample_rate)]
+                seg_rms = np.sqrt(np.mean(seg ** 2)) if len(seg) > 0 else 1e-8
+                perc_ratio = np.mean(perc_curve[sf:ef]) / (seg_rms + 1e-8)
+            else:
+                perc_ratio = 0.35
+        else:
+            start_sample = int(start_time * self.sample_rate)
+            end_sample = int(end_time * self.sample_rate)
+            segment = audio[start_sample:end_sample]
+            perc_ratio = 0.35
+            if len(segment) > self.sample_rate:
+                try:
+                    _, percussive = librosa.effects.hpss(segment)
+                    perc_ratio = np.sqrt(np.mean(percussive ** 2)) / (np.sqrt(np.mean(segment ** 2)) + 1e-8)
+                except:
+                    pass
+
+        if perc_ratio < 0.30:
+            score += 22
+            reasons.append("LOW_PERCUSSION")
+        elif perc_ratio < 0.45:
+            score += 12
+            reasons.append("MED_PERCUSSION")
         
         bars = beat_info['bars']
         if len(bars) > 0:
@@ -521,20 +502,32 @@ class LoopFinder:
         
         return score, has_vocals, reasons
 
-    def find_best_loop(self, audio, target_time, n_bars=8, search_range=30.0, position='any'):
+    def find_best_loop(self, audio, target_time, n_bars=8, search_range=30.0, position='any',
+                       beat_info=None, sections=None, instrumental=None):
         duration = len(audio) / self.sample_rate
-        beat_info = self.phrase_detector.detect_beats_and_phrases(audio)
+
+        if beat_info is None:
+            beat_info = self.phrase_detector.detect_beats_and_phrases(audio)
         bar_dur = beat_info['bar_duration']
         loop_dur = bar_dur * n_bars
         bars = beat_info['bars']
-        
+
         if len(bars) == 0:
             return target_time, target_time + loop_dur, True, []
-        
-        sections = self.structure_analyzer.detect_sections(audio)
+
+        if sections is None:
+            sections = self.structure_analyzer.detect_sections(audio)
         loopable_sections = [s for s in sections if s.get('loopable', False)]
-        
-        instrumental = self.vocal_detector.get_instrumental_segments(audio, min_duration=loop_dur * 0.8)
+
+        if instrumental is None:
+            instrumental = self.vocal_detector.get_instrumental_segments(audio, min_duration=loop_dur * 0.8)
+
+        vocal_scores = self.vocal_detector.detect_vocals_curve(audio)
+        try:
+            _, _percussive = librosa.effects.hpss(audio)
+            perc_curve = librosa.feature.rms(y=_percussive, hop_length=512)[0]
+        except Exception:
+            perc_curve = None
         
         priority_zones = []
         for sect in loopable_sections:
@@ -563,7 +556,10 @@ class LoopFinder:
             if len(end_bars) > 0:
                 loop_end = end_bars[0]
             
-            score, has_vocals, reasons = self.score_loop(audio, bar_time, loop_end, beat_info, position)
+            score, has_vocals, reasons = self.score_loop(
+                audio, bar_time, loop_end, beat_info, position,
+                vocal_scores=vocal_scores, perc_curve=perc_curve
+            )
             
             for pz in priority_zones:
                 if bar_time >= pz['start'] - 0.5 and loop_end <= pz['end'] + 0.5:
@@ -592,22 +588,24 @@ class LoopFinder:
         best = max(pool, key=lambda x: x['score'])
         return best['start'], best['end'], best['has_vocals'], best['reasons']
 
-    def find_outro_loop(self, audio, n_bars=8):
+    def find_outro_loop(self, audio, n_bars=8, beat_info=None, sections=None, instrumental=None):
         duration = len(audio) / self.sample_rate
         target = duration * 0.75
-        return self.find_best_loop(audio, target, n_bars, search_range=duration * 0.22, position='outro')
+        return self.find_best_loop(audio, target, n_bars, search_range=duration * 0.22, position='outro',
+                                   beat_info=beat_info, sections=sections, instrumental=instrumental)
 
-    def find_intro_loop(self, audio, n_bars=8):
+    def find_intro_loop(self, audio, n_bars=8, beat_info=None, sections=None, instrumental=None):
         duration = len(audio) / self.sample_rate
         target = min(18.0, duration * 0.15)
-        return self.find_best_loop(audio, target, n_bars, search_range=22.0, position='intro')
+        return self.find_best_loop(audio, target, n_bars, search_range=22.0, position='intro',
+                                   beat_info=beat_info, sections=sections, instrumental=instrumental)
 
-    def find_breakdown_loop(self, audio, n_bars=8):
+    def find_breakdown_loop(self, audio, n_bars=8, beat_info=None, sections=None, instrumental=None):
         duration = len(audio) / self.sample_rate
-        
+
         energy = self.structure_analyzer.get_energy_curve(audio)
         perc = self.structure_analyzer.get_percussive_energy(audio)
-        
+
         breakdowns = self.structure_analyzer._find_breakdowns(
             energy, perc,
             np.percentile(energy, 32),
@@ -615,20 +613,22 @@ class LoopFinder:
             self.structure_analyzer.hop_length / self.sample_rate,
             duration
         )
-        
+
         if breakdowns:
             best_bd = breakdowns[0]
             target = (best_bd['start'] + best_bd['end']) / 2
-            return self.find_best_loop(audio, target, n_bars, search_range=best_bd['duration'], position='any')
-        
-        return self.find_best_loop(audio, duration * 0.5, n_bars, position='any')
+            search_range = max(best_bd['duration'], 30.0)
+            return self.find_best_loop(audio, target, n_bars, search_range=search_range, position='any',
+                                       beat_info=beat_info, sections=sections, instrumental=instrumental)
+
+        return self.find_best_loop(audio, duration * 0.5, n_bars, position='any',
+                                   beat_info=beat_info, sections=sections, instrumental=instrumental)
 
 
 class SmartTransitionGenerator:
-    def __init__(self, sample_rate=SAMPLE_RATE, model_path="models/params_vae.pth"):
+    def __init__(self, sample_rate=SAMPLE_RATE):
         self.sample_rate = sample_rate
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.separator = AudioSeparator(sample_rate)
         self.feature_extractor = FeatureExtractor(sample_rate)
         self.key_analyzer = KeyAnalyzer(sample_rate)
         self.vocal_detector = VocalDetector(sample_rate)
@@ -637,101 +637,46 @@ class SmartTransitionGenerator:
         self.harmonic_mixer = HarmonicMixer(sample_rate)
         self.loop_finder = LoopFinder(sample_rate)
         self.circle_of_fifths = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F']
-        self.model = None
-        self.model_loaded = False
-        if MODEL_AVAILABLE and os.path.exists(model_path):
-            self._load_model(model_path)
+        self.mel_encoder = None
+        self.mel_vae = None
+        self.compat_scorer = AudioCompatibilityScorer(sample_rate)
+        self._load_mel_models()
 
-    def _load_model(self, path):
-        try:
-            checkpoint = torch.load(path, map_location=self.device)
-            self.model = TransitionParamsVAE(
-                input_dim=checkpoint.get('input_dim', 28),
-                hidden_dim=512,
-                latent_dim=checkpoint.get('latent_dim', 128),
-                output_dim=checkpoint.get('output_dim', 24)
-            ).to(self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.model.eval()
-            self.model_loaded = True
-            print("  [OK] IA Model loaded")
-        except Exception as e:
-            print(f"  [!] Model error: {e}")
-
-    def _extract_features(self, audio):
-        features = self.feature_extractor.extract_all(audio)
-        key_info = self.key_analyzer.detect_key(audio)
-        
-        try:
-            tempo, beat_frames = librosa.beat.beat_track(y=audio, sr=self.sample_rate)
-            beat_times = librosa.frames_to_time(beat_frames, sr=self.sample_rate)
-            beat_reg = 1.0 - np.std(np.diff(beat_times)) / (np.mean(np.diff(beat_times)) + 1e-8) if len(beat_times) > 2 else 0.5
-            beat_reg = max(0, min(1, beat_reg))
-        except:
-            beat_reg = 0.5
-        
-        stft = np.abs(librosa.stft(audio))
-        low_e = np.mean(stft[:int(stft.shape[0] * 0.1), :])
-        mid_e = np.mean(stft[int(stft.shape[0] * 0.1):int(stft.shape[0] * 0.5), :])
-        high_e = np.mean(stft[int(stft.shape[0] * 0.5):, :])
-        total = low_e + mid_e + high_e + 1e-8
-        
-        rms = librosa.feature.rms(y=audio)[0]
-        rms_var = np.std(rms) / (np.mean(rms) + 1e-8)
-        
-        onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate)
-        onset_density = np.sum(onset_env > np.mean(onset_env) * 1.5) / len(onset_env)
-        
-        spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=audio, sr=self.sample_rate))
-        spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(y=audio, sr=self.sample_rate))
-        spectral_flatness = np.mean(librosa.feature.spectral_flatness(y=audio))
-        
-        key = key_info['key']
-        key_pos = self.circle_of_fifths.index(key) / 12.0 if key in self.circle_of_fifths else 0.5
-        
-        return np.array([
-            features['bpm'] / 200.0,
-            features['energy'],
-            key_pos,
-            1.0 if key_info['mode'] == 'major' else 0.0,
-            key_info['confidence'],
-            low_e / total,
-            mid_e / total,
-            high_e / total,
-            min(spectral_centroid / 5000.0, 1.0),
-            min(spectral_rolloff / 10000.0, 1.0),
-            min(spectral_flatness * 10, 1.0),
-            beat_reg,
-            min(rms_var, 1.0),
-            min(onset_density * 5, 1.0)
-        ], dtype=np.float32)
+    def _load_mel_models(self):
+        enc_path = "models/mel_encoder.pth"
+        vae_path = "models/mel_vae.pth"
+        if os.path.exists(enc_path):
+            try:
+                ckpt = torch.load(enc_path, map_location=self.device)
+                self.mel_encoder = MelEncoder(
+                    n_mels=ckpt.get('n_mels', 64),
+                    embedding_dim=ckpt.get('embedding_dim', ENCODER_DIM),
+                ).to(self.device)
+                self.mel_encoder.load_state_dict(ckpt['model_state'])
+                self.mel_encoder.eval()
+                print("  [OK] MelEncoder loaded")
+            except Exception as e:
+                print(f"  [!] MelEncoder error: {e}")
+        if os.path.exists(vae_path) and self.mel_encoder is not None:
+            try:
+                ckpt = torch.load(vae_path, map_location=self.device)
+                self.mel_vae = MelTransitionVAE(
+                    embedding_dim=ckpt.get('embedding_dim', ENCODER_DIM * 2),
+                    latent_dim=ckpt.get('latent_dim', 64),
+                    output_dim=ckpt.get('output_dim', 24),
+                ).to(self.device)
+                self.mel_vae.load_state_dict(ckpt['model_state'])
+                self.mel_vae.eval()
+                print("  [OK] MelTransitionVAE loaded")
+            except Exception as e:
+                print(f"  [!] MelTransitionVAE error: {e}")
 
     def _get_ai_params(self, audio1, audio2):
-        f1 = self._extract_features(audio1)
-        f2 = self._extract_features(audio2)
-        
-        if self.model is not None and self.model_loaded:
-            try:
-                input_features = np.concatenate([f1, f2])
-                input_tensor = torch.FloatTensor(input_features).unsqueeze(0).to(self.device)
-                params_tensor = self.model.predict(input_tensor)
-                return self.model.get_params_dict(params_tensor)
-            except:
-                pass
-        return self._default_params()
-
-    def _default_params(self):
-        return {
-            'low_eq_1': -0.5, 'mid_eq_1': -0.3, 'high_eq_1': -0.2,
-            'low_eq_2': -0.8, 'mid_eq_2': -0.2, 'high_eq_2': -0.3,
-            'volume_curve_1': 0.6, 'volume_curve_2': 0.6,
-            'crossfade_type': 1, 'crossfade_position': 0.5,
-            'cue_out_position': 0.8, 'cue_in_position': 0.05,
-            'align_to_beat': 0.8, 'align_to_bar': 0.6,
-            'transition_beats': 32, 'eq_swap_timing': 0.5, 'bass_swap_beat': 0.5,
-            'mix_style': 0, 'filter_sweep': 0.5, 'filter_resonance': 0.3, 'tension_effect': 0,
-            'duck_vocals_1': 0.0, 'duck_vocals_2': 0.0, 'energy_direction': 0.5
-        }
+        emb1 = self.mel_encoder.embed_audio(audio1, self.sample_rate, self.device)
+        emb2 = self.mel_encoder.embed_audio(audio2, self.sample_rate, self.device)
+        inp = torch.FloatTensor(np.concatenate([emb1, emb2])).unsqueeze(0).to(self.device)
+        params_tensor = self.mel_vae.predict(inp)
+        return self.mel_vae.get_params_dict(params_tensor)
 
     def analyze_track(self, audio, name="Track"):
         print(f"\n  === ANALYSE: {name} ===")
@@ -741,8 +686,8 @@ class SmartTransitionGenerator:
         camelot = self.harmonic_mixer.get_camelot(key_info['key'], key_info['mode'])
         
         sections = self.structure_analyzer.detect_sections(audio)
-        vocal_segments = self.vocal_detector.get_vocal_segments(audio)
-        instrumental_segments = self.vocal_detector.get_instrumental_segments(audio)
+        vocal_segments = self.vocal_detector.get_vocal_segments(audio, threshold=0.45)
+        instrumental_segments = self.vocal_detector.get_instrumental_segments(audio, threshold=0.45)
         
         duration = len(audio) / self.sample_rate
         
@@ -778,90 +723,7 @@ class SmartTransitionGenerator:
             'instrumental_segments': instrumental_segments
         }
 
-    def _create_seamless_loop(self, audio, start_time, end_time, target_duration, tempo):
-        start_sample = int(start_time * self.sample_rate)
-        end_sample = int(end_time * self.sample_rate)
-        loop_segment = audio[start_sample:end_sample]
-        
-        if len(loop_segment) == 0:
-            return np.zeros(int(target_duration * self.sample_rate))
-        
-        xfade_samples = int(0.025 * self.sample_rate)
-        if len(loop_segment) > xfade_samples * 4:
-            fade = np.linspace(0, 1, xfade_samples)
-            
-            end_part = loop_segment[-xfade_samples:].copy()
-            start_part = loop_segment[:xfade_samples].copy()
-            
-            crossfade = end_part * (1 - fade) + start_part * fade
-            loop_segment = np.concatenate([
-                loop_segment[xfade_samples:-xfade_samples],
-                crossfade
-            ])
-        
-        loop_dur = len(loop_segment) / self.sample_rate
-        n_repeats = int(np.ceil(target_duration / loop_dur)) + 1
-        
-        looped = np.tile(loop_segment, n_repeats)
-        target_samples = int(target_duration * self.sample_rate)
-        
-        if len(looped) > target_samples:
-            looped = looped[:target_samples]
-        elif len(looped) < target_samples:
-            looped = np.pad(looped, (0, target_samples - len(looped)))
-        
-        return looped
-
-    def _apply_filter_sweep(self, audio, start_freq, end_freq):
-        n = len(audio)
-        output = np.zeros(n)
-        n_seg = 55
-        seg_len = n // n_seg
-        
-        for i in range(n_seg):
-            s, e = i * seg_len, min((i + 1) * seg_len, n)
-            t = i / (n_seg - 1)
-            freq = start_freq * ((end_freq / start_freq) ** t)
-            freq = max(70, min(freq, self.sample_rate / 2 - 100))
-            
-            try:
-                b, a = butter(3, freq / (self.sample_rate / 2), btype='low')
-                output[s:e] = filtfilt(b, a, audio[s:e])
-            except:
-                output[s:e] = audio[s:e]
-        
-        return output
-
-    def _apply_reverb(self, audio, amount):
-        if amount < 0.05:
-            return audio
-        delays = [int(d * self.sample_rate / 1000) for d in [17, 29, 41, 53]]
-        output = audio.copy()
-        for i, delay in enumerate(delays):
-            gain = (0.30 ** (i + 1)) * amount
-            if delay < len(audio):
-                output[delay:] += audio[:-delay] * gain
-        peak = np.max(np.abs(output))
-        return output / peak * 0.95 if peak > 1 else output
-
-    def _apply_echo(self, audio, amount, tempo):
-        if amount < 0.05:
-            return audio
-        delay = int((60.0 / tempo * 0.5) * self.sample_rate)
-        output = audio.copy()
-        for i in range(3):
-            d = delay * (i + 1)
-            if d < len(audio):
-                output[d:] += audio[:-d] * ((0.40 * amount) ** (i + 1))
-        peak = np.max(np.abs(output))
-        return output / peak * 0.95 if peak > 1 else output
-
-    def _resize(self, arr, length):
-        if len(arr) >= length:
-            return arr[:length]
-        return np.pad(arr, (0, length - len(arr)))
-
-    def generate_transition(self, audio1, audio2, duration=20.0, style='auto'):
+    def generate_transition(self, audio1, audio2):
         print("\n" + "=" * 60)
         print("  DJ TRANSITION GENERATOR - PROFESSIONAL EDITION")
         print("=" * 60)
@@ -882,14 +744,11 @@ class SmartTransitionGenerator:
         
         tempo1, tempo2 = analysis1['tempo'], analysis2['tempo']
         avg_tempo = (tempo1 + tempo2) / 2
-        bpm_diff = abs(tempo1 - tempo2) / avg_tempo * 100
-        
+
         print(f"\n  === TEMPO SYNC ===")
         print(f"  Track A: {tempo1:.1f} BPM")
         print(f"  Track B: {tempo2:.1f} BPM")
-        print(f"  Difference: {bpm_diff:.1f}%")
-        if bpm_diff > 3:
-            print(f"  -> Time-stretch required")
+        print(f"  Mix tempo: {avg_tempo:.1f} BPM")
         
         n_bars = 8 if p['transition_beats'] >= 32 else 4
         
@@ -897,25 +756,41 @@ class SmartTransitionGenerator:
         print(f"  Target: {n_bars} bars")
         
         print(f"\n  Track A - Finding outro loop...")
-        loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_outro_loop(audio1, n_bars=n_bars)
+        loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_outro_loop(
+            audio1, n_bars=n_bars,
+            beat_info=analysis1['beat_info'], sections=analysis1['sections'],
+            instrumental=analysis1['instrumental_segments']
+        )
         print(f"    Position: {loop1_start:.1f}s - {loop1_end:.1f}s ({loop1_end - loop1_start:.1f}s)")
         print(f"    Vocals: {'YES' if has_v1 else 'NO'}")
         print(f"    Criteria: {', '.join(reasons1[:4])}")
-        
+
         if has_v1:
             print(f"    -> Searching alternative breakdown...")
-            loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_breakdown_loop(audio1, n_bars=n_bars)
+            loop1_start, loop1_end, has_v1, reasons1 = self.loop_finder.find_breakdown_loop(
+                audio1, n_bars=n_bars,
+                beat_info=analysis1['beat_info'], sections=analysis1['sections'],
+                instrumental=analysis1['instrumental_segments']
+            )
             print(f"    New: {loop1_start:.1f}s - {loop1_end:.1f}s | Vocals: {'YES' if has_v1 else 'NO'}")
-        
+
         print(f"\n  Track B - Finding intro loop...")
-        loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_intro_loop(audio2, n_bars=n_bars)
+        loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_intro_loop(
+            audio2, n_bars=n_bars,
+            beat_info=analysis2['beat_info'], sections=analysis2['sections'],
+            instrumental=analysis2['instrumental_segments']
+        )
         print(f"    Position: {loop2_start:.1f}s - {loop2_end:.1f}s ({loop2_end - loop2_start:.1f}s)")
         print(f"    Vocals: {'YES' if has_v2 else 'NO'}")
         print(f"    Criteria: {', '.join(reasons2[:4])}")
-        
+
         if has_v2:
             print(f"    -> Searching alternative breakdown...")
-            loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_breakdown_loop(audio2, n_bars=n_bars)
+            loop2_start, loop2_end, has_v2, reasons2 = self.loop_finder.find_breakdown_loop(
+                audio2, n_bars=n_bars,
+                beat_info=analysis2['beat_info'], sections=analysis2['sections'],
+                instrumental=analysis2['instrumental_segments']
+            )
             print(f"    New: {loop2_start:.1f}s - {loop2_end:.1f}s | Vocals: {'YES' if has_v2 else 'NO'}")
         
         trans_beats = p['transition_beats']
@@ -924,41 +799,97 @@ class SmartTransitionGenerator:
         
         print(f"\n  === TRANSITION BUILD ===")
         print(f"  Duration: {trans_dur:.1f}s ({trans_beats:.0f} beats)")
-        print(f"  Mix tempo: {avg_tempo:.1f} BPM")
         
         n_samples = int(trans_dur * self.sample_rate)
-        
-        print(f"\n  Creating seamless loops...")
-        loop1_audio = self._create_seamless_loop(audio1, loop1_start, loop1_end, trans_dur * 0.55, tempo1)
-        loop2_audio = self._create_seamless_loop(audio2, loop2_start, loop2_end, trans_dur * 0.55, tempo2)
-        
-        if bpm_diff > 2.5:
-            print(f"  Applying time-stretch...")
-            rate1 = tempo1 / avg_tempo
-            rate2 = tempo2 / avg_tempo
-            loop1_audio = librosa.effects.time_stretch(loop1_audio, rate=rate1)
-            loop2_audio = librosa.effects.time_stretch(loop2_audio, rate=rate2)
-        
-        loop1_audio = self._resize(loop1_audio, int(trans_dur * 0.55 * self.sample_rate))
-        loop2_audio = self._resize(loop2_audio, int(trans_dur * 0.55 * self.sample_rate))
-        
-        print(f"  Separating stems...")
-        comp1 = self.separator.full_separation(loop1_audio)
-        comp2 = self.separator.full_separation(loop2_audio)
-        
-        print(f"  Mixing with EQ and effects...")
-        transition = self._mix_loops(comp1, comp2, n_samples, p, avg_tempo, harm_score)
-        
+
+        cf_type = int(round(p.get('crossfade_type', 1)))
+        bass_swap_beat = p.get('bass_swap_beat', 0.5)
+        print(f"\n  Building AI-driven crossfade...")
+        print(f"  Curve type: {cf_type} ({['linear','cosine²','power'][cf_type if cf_type in (0,1,2) else 1]}) | Bass swap: {bass_swap_beat:.0%}")
+
+        seg1_start = int(loop1_start * self.sample_rate)
+        seg2_start = int(loop2_start * self.sample_rate)
+
+        seg1 = audio1[seg1_start:seg1_start + n_samples]
+        seg2 = audio2[seg2_start:seg2_start + n_samples]
+
+        if len(seg1) < n_samples:
+            seg1 = np.pad(seg1, (0, n_samples - len(seg1)))
+        if len(seg2) < n_samples:
+            seg2 = np.pad(seg2, (0, n_samples - len(seg2)))
+
+        t = np.linspace(0, 1, n_samples)
+
+        if cf_type == 0:
+            curve_out = 1 - t
+            curve_in = t
+        elif cf_type == 1:
+            curve_out = np.cos(t * np.pi / 2) ** 2
+            curve_in = np.sin(t * np.pi / 2) ** 2
+        else:
+            curve_out = (1 - t) ** 1.5
+            curve_in = t ** 1.5
+
+        try:
+            nyq = self.sample_rate / 2
+            b_lo, a_lo = butter(4, 200 / nyq, btype='low')
+            b_hi, a_hi = butter(4, 200 / nyq, btype='high')
+
+            bass1 = filtfilt(b_lo, a_lo, seg1)
+            body1 = filtfilt(b_hi, a_hi, seg1)
+            bass2 = filtfilt(b_lo, a_lo, seg2)
+            body2 = filtfilt(b_hi, a_hi, seg2)
+
+            bar_samples = int((4 * 60 / avg_tempo) * self.sample_rate)
+            swap_idx = int(n_samples * bass_swap_beat)
+            swap_idx = (swap_idx // bar_samples) * bar_samples
+            swap_idx = max(bar_samples, min(swap_idx, n_samples - bar_samples))
+
+            low_mix = np.zeros(n_samples)
+            low_mix[:swap_idx] = bass1[:swap_idx]
+            swap_len = min(bar_samples, n_samples - swap_idx)
+            if swap_len > 0:
+                sw_t = np.linspace(0, 1, swap_len)
+                sw_out = np.cos(sw_t * np.pi / 2)
+                sw_in = np.sin(sw_t * np.pi / 2)
+                low_mix[swap_idx:swap_idx + swap_len] = (
+                    bass1[swap_idx:swap_idx + swap_len] * sw_out +
+                    bass2[swap_idx:swap_idx + swap_len] * sw_in
+                )
+            if swap_idx + swap_len < n_samples:
+                low_mix[swap_idx + swap_len:] = bass2[swap_idx + swap_len:]
+
+            body_mix = body1 * curve_out + body2 * curve_in
+            transition = low_mix + body_mix
+            print(f"  Bass swap at: {swap_idx / self.sample_rate:.1f}s into transition")
+        except Exception as e:
+            print(f"  [!] Bass swap failed ({e}), using full crossfade")
+            transition = seg1 * curve_out + seg2 * curve_in
+
+        loop2_end = loop2_start + trans_dur
+
         peak = np.max(np.abs(transition))
         if peak > 0:
             transition = transition * (0.95 / peak)
-        
+
+        audio_scores = None
+        if self.compat_scorer is not None:
+            try:
+                audio_scores = self.compat_scorer.score(seg1, seg2)
+                print(f"\n  === AUDIO COMPATIBILITY (mel analysis) ===")
+                print(f"  Total score:        {audio_scores['total_score']:.2%}")
+                print(f"  Energy continuity:  {audio_scores['energy_continuity']:.2%}")
+                print(f"  Spectral match:     {audio_scores['spectral_match']:.2%}")
+                print(f"  Harmonic coherence: {audio_scores['harmonic_coherence']:.2%}")
+            except Exception as e:
+                print(f"  [!] Compatibility scoring error: {e}")
+
         print(f"\n  === RESULT ===")
         print(f"  Transition: {len(transition) / self.sample_rate:.1f}s")
         print(f"  Harmonic blend: {harm_type}")
         print(f"  Vocal conflicts: {'NONE' if (not has_v1 and not has_v2) else 'MANAGED'}")
         print("=" * 60)
-        
+
         return transition, {
             'track1_cut_time': loop1_start,
             'track2_start_time': loop2_start,
@@ -984,84 +915,8 @@ class SmartTransitionGenerator:
                     'description': harm_desc
                 }
             },
-            'params': p
+            'params': p,
+            'audio_scores': audio_scores,
+            'mel_model_used': self.mel_vae is not None,
         }
 
-    def _mix_loops(self, comp1, comp2, length, p, tempo, harmony_score):
-        t = np.linspace(0, 1, length)
-        
-        cf_type = p['crossfade_type']
-        if cf_type == 0:
-            curve_out = 1 - t
-            curve_in = t
-        elif cf_type == 1:
-            curve_out = np.cos(t * np.pi / 2) ** 2
-            curve_in = np.sin(t * np.pi / 2) ** 2
-        else:
-            curve_out = (1 - t) ** 1.5
-            curve_in = t ** 1.5
-        
-        beat_samples = int(60 / tempo * self.sample_rate)
-        bar_samples = beat_samples * 4
-        
-        low1 = self._resize(comp1['bass'], length)
-        mid1 = self._resize(comp1['mids'], length)
-        high1 = self._resize(comp1['highs'], length)
-        harm1 = self._resize(comp1['harmonic'], length)
-        
-        low2 = self._resize(comp2['bass'], length)
-        mid2 = self._resize(comp2['mids'], length)
-        high2 = self._resize(comp2['highs'], length)
-        harm2 = self._resize(comp2['harmonic'], length)
-        
-        bass_swap = int(length * p['bass_swap_beat'])
-        bass_swap = (bass_swap // bar_samples) * bar_samples
-        bass_swap = max(bar_samples, min(bass_swap, length - bar_samples))
-        
-        low_mix = np.zeros(length)
-        low_mix[:bass_swap] = low1[:bass_swap]
-        
-        swap_len = min(bar_samples, length - bass_swap)
-        if swap_len > 0:
-            swap_t = np.linspace(0, 1, swap_len)
-            swap_out = np.cos(swap_t * np.pi / 2)
-            swap_in = np.sin(swap_t * np.pi / 2)
-            low_mix[bass_swap:bass_swap + swap_len] = (
-                low1[bass_swap:bass_swap + swap_len] * swap_out +
-                low2[bass_swap:bass_swap + swap_len] * swap_in
-            )
-        
-        if bass_swap + swap_len < length:
-            low_mix[bass_swap + swap_len:] = low2[bass_swap + swap_len:]
-        
-        mid_eq1 = np.linspace(1, 10 ** (p['mid_eq_1'] / 20), length)
-        mid_eq2 = np.linspace(10 ** (p['mid_eq_2'] / 20), 1, length)
-        high_eq1 = np.linspace(1, 10 ** (p['high_eq_1'] / 20), length)
-        high_eq2 = np.linspace(10 ** (p['high_eq_2'] / 20), 1, length)
-        
-        mid_mix = mid1 * mid_eq1 * curve_out + mid2 * mid_eq2 * curve_in
-        high_mix = high1 * high_eq1 * curve_out + high2 * high_eq2 * curve_in
-        
-        harm_blend = max(0.25, harmony_score * 0.45)
-        if p['filter_sweep'] > 0.3:
-            harm1_f = self._apply_filter_sweep(harm1, 5500, 280)
-            harm2_f = self._apply_filter_sweep(harm2, 280, 5500)
-            harm_mix = harm1_f * curve_out * harm_blend + harm2_f * curve_in * harm_blend
-        else:
-            harm_mix = harm1 * curve_out * harm_blend + harm2 * curve_in * harm_blend
-        
-        mix = low_mix * 0.35 + mid_mix * 0.28 + high_mix * 0.17 + harm_mix * 0.20
-        
-        tension = p['tension_effect']
-        if tension == 1:
-            mix = self._apply_echo(mix, 0.22, tempo)
-        elif tension == 2:
-            rev_curve = np.sin(t * np.pi)
-            mix_rev = self._apply_reverb(mix, 0.32)
-            mix = mix * (1 - rev_curve * 0.18) + mix_rev * rev_curve * 0.18
-        elif tension == 3:
-            noise = np.random.randn(length) * 0.004
-            noise = self._apply_filter_sweep(noise, 90, 1600)
-            mix = mix + noise * (t ** 2.5) * 0.035
-        
-        return mix

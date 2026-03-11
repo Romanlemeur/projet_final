@@ -19,7 +19,7 @@ class TransitionGenerator:
         self.ai_generator = SmartTransitionGenerator(sample_rate)
 
     def generate_transition(self, track1_path, track2_path, transition_duration=20.0,
-                           output_path=None, style='auto', overlap_duration=3.5):
+                           output_path=None, style='auto', overlap_duration=0.5):
         print("\n" + "=" * 60)
         print("  DJ TRANSITION GENERATOR")
         print("=" * 60)
@@ -30,24 +30,29 @@ class TransitionGenerator:
         
         print(f"  Track A: {len(audio1)/self.sample_rate:.1f}s")
         print(f"  Track B: {len(audio2)/self.sample_rate:.1f}s")
-        
+
+        for arr in [audio1, audio2]:
+            peak = np.max(np.abs(arr))
+            if peak > 0:
+                arr *= (0.95 / peak)
+
         print("\n[2/5] AI Analysis & Transition Generation...")
-        transition_audio, cut_info = self.ai_generator.generate_transition(
-            audio1, audio2,
-            duration=transition_duration,
-            style=style
-        )
+        transition_audio, cut_info = self.ai_generator.generate_transition(audio1, audio2)
         
         loop1_info = cut_info['loop1']
         loop2_info = cut_info['loop2']
         actual_duration = cut_info['transition_duration']
         
         print("\n[3/5] Assembling final mix...")
-        
+
         overlap_samples = int(overlap_duration * self.sample_rate)
         cut_sample1 = int(loop1_info['start'] * self.sample_rate)
         start_sample2 = int(loop2_info['end'] * self.sample_rate)
-        
+
+        peak = np.max(np.abs(transition_audio))
+        if peak > 0:
+            transition_audio *= (0.95 / peak)
+
         part1_end = max(0, cut_sample1 - overlap_samples)
         part1 = audio1[:part1_end]
         
@@ -108,7 +113,9 @@ class TransitionGenerator:
         print(f"    Part 4 (Fade out):      {len(part4)/self.sample_rate:.1f}s")
         print(f"    Part 5 (Track B clean): {len(part5)/self.sample_rate:.1f}s")
         print(f"\n  Total duration: {duration_total:.1f}s")
-        
+
+        transition_start_time = part1_end / self.sample_rate
+
         if output_path:
             print(f"\n[5/5] Exporting...")
             self.exporter.export_wav(full_mix, output_path)
@@ -118,10 +125,38 @@ class TransitionGenerator:
         print("  TRANSITION COMPLETE")
         print("=" * 60)
         
+        a1 = cut_info['analysis']['track1']
+        a2 = cut_info['analysis']['track2']
+
         return {
             'audio': full_mix,
             'duration': duration_total,
             'transition_duration': actual_duration,
             'cut_info': cut_info,
-            'harmony': cut_info['analysis']['harmony']
+            'harmony': cut_info['analysis']['harmony'],
+            'params': cut_info['params'],
+            'style': style,
+            'analysis_track1': {
+                'bpm': a1['tempo'],
+                'energy': self.feature_extractor.extract_energy(audio1),
+                'key': a1['key'],
+                'mode': a1['mode'],
+                'key_confidence': a1['key_confidence'],
+                'duration': a1['duration'],
+                'best_outro': {'time': cut_info['loop1']['start']},
+                'best_intro': {'time': 0.0},
+            },
+            'analysis_track2': {
+                'bpm': a2['tempo'],
+                'energy': self.feature_extractor.extract_energy(audio2),
+                'key': a2['key'],
+                'mode': a2['mode'],
+                'key_confidence': a2['key_confidence'],
+                'duration': a2['duration'],
+                'best_outro': {'time': cut_info['loop2']['start']},
+                'best_intro': {'time': cut_info['loop2']['start']},
+            },
+            'audio_scores': cut_info.get('audio_scores'),
+            'mel_model_used': cut_info.get('mel_model_used', False),
+            'transition_start': transition_start_time,
         }

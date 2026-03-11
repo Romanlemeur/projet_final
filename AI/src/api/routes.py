@@ -1,5 +1,3 @@
-"""Routes de l'API."""
-
 import os
 import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -8,46 +6,42 @@ from fastapi.responses import FileResponse
 from src.api.schemas import (
     TransitionRequest, TransitionResponse,
     AnalyzeRequest, AnalyzeResponse,
-    TrackAnalysis, HealthResponse
+    TrackAnalysis, HealthResponse, CompareResponse
 )
 from src.audio.loader import AudioLoader
 from src.analysis.feature_extractor import FeatureExtractor
 from src.analysis.beat_detector import BeatDetector
 from src.analysis.key_analyzer import KeyAnalyzer
 from src.transition.generator import TransitionGenerator
+from src.transition.simple_crossfade import simple_crossfade
+from src.audio.exporter import AudioExporter
 from src.utils.config import SAMPLE_RATE
+from src.utils.explainer import explain_params
 
-# Créer le router
 router = APIRouter()
 
-# Dossiers de travail
 UPLOAD_DIR = "data/input"
 OUTPUT_DIR = "data/output"
 
-# Initialiser les modules
 loader = AudioLoader(SAMPLE_RATE)
 feature_extractor = FeatureExtractor(SAMPLE_RATE)
 beat_detector = BeatDetector(SAMPLE_RATE)
 key_analyzer = KeyAnalyzer(SAMPLE_RATE)
 generator = TransitionGenerator(SAMPLE_RATE)
+exporter = AudioExporter(SAMPLE_RATE)
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Vérifie que l'API fonctionne."""
-    # Vérifier si le modèle IA est chargé
-    ai_loaded = generator.ai_generator.vae_model is not None
-    
     return HealthResponse(
         status="healthy",
-        version="2.0.0",
-        ai_model_loaded=ai_loaded
+        version="3.0.0",
+        ai_model_loaded=generator.ai_generator.mel_vae is not None,
     )
 
 
 @router.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """Upload un fichier audio."""
     allowed_extensions = ['.mp3', '.wav', '.flac', '.ogg']
     ext = os.path.splitext(file.filename)[1].lower()
     
@@ -76,7 +70,6 @@ async def upload_file(file: UploadFile = File(...)):
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_track(request: AnalyzeRequest):
-    """Analyse un morceau audio."""
     file_path = os.path.join(UPLOAD_DIR, request.filename)
     
     if not os.path.exists(file_path):
@@ -119,7 +112,6 @@ async def analyze_track(request: AnalyzeRequest):
 
 @router.post("/generate", response_model=TransitionResponse)
 async def generate_transition(request: TransitionRequest):
-    """Génère une transition entre deux morceaux."""
     track1_path = os.path.join(UPLOAD_DIR, request.track1_filename)
     track2_path = os.path.join(UPLOAD_DIR, request.track2_filename)
     
@@ -135,7 +127,6 @@ async def generate_transition(request: TransitionRequest):
         
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        # Générer la transition
         result = generator.generate_transition(
             track1_path,
             track2_path,
@@ -145,7 +136,6 @@ async def generate_transition(request: TransitionRequest):
             overlap_duration=request.overlap_duration
         )
         
-        # Construire la réponse
         track1_analysis = TrackAnalysis(
             bpm=result['analysis_track1']['bpm'],
             energy=result['analysis_track1']['energy'],
@@ -168,9 +158,16 @@ async def generate_transition(request: TransitionRequest):
             best_intro_time=result['analysis_track2']['best_intro']['time']
         )
         
-        # Info sur le modèle IA
-        ai_info = "Modèle VAE" if generator.ai_generator.vae_model else "Mode fallback (effets)"
-        
+        ai_info = "MelTransitionVAE"
+
+        decisions = explain_params(
+            params=result['params'],
+            analysis1=result['cut_info']['analysis']['track1'],
+            analysis2=result['cut_info']['analysis']['track2'],
+            harmony=result['harmony'],
+            cut_info=result['cut_info'],
+        )
+
         return TransitionResponse(
             success=True,
             message="Transition générée avec succès",
@@ -180,9 +177,13 @@ async def generate_transition(request: TransitionRequest):
             track1_analysis=track1_analysis,
             track2_analysis=track2_analysis,
             style=result['style'],
-            quality_info=ai_info
+            quality_info=ai_info,
+            ai_decisions=decisions,
+            audio_scores=result.get('audio_scores'),
+            mel_model_used=result.get('mel_model_used', False),
+            transition_start=result.get('transition_start'),
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -192,7 +193,6 @@ async def generate_transition(request: TransitionRequest):
 
 @router.get("/download/{filename}")
 async def download_file(filename: str):
-    """Télécharge un fichier généré."""
     file_path = os.path.join(OUTPUT_DIR, filename)
     
     if not os.path.exists(file_path):
@@ -205,9 +205,92 @@ async def download_file(filename: str):
     )
 
 
+@router.post("/compare", response_model=CompareResponse)
+async def compare_transitions(request: TransitionRequest):
+    track1_path = os.path.join(UPLOAD_DIR, request.track1_filename)
+    track2_path = os.path.join(UPLOAD_DIR, request.track2_filename)
+
+    if not os.path.exists(track1_path):
+        raise HTTPException(status_code=404, detail="Track 1 not found")
+    if not os.path.exists(track2_path):
+        raise HTTPException(status_code=404, detail="Track 2 not found")
+
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+        audio1, _ = loader.load(track1_path)
+        audio2, _ = loader.load(track2_path)
+
+        simple_audio = simple_crossfade(
+            audio1, audio2, SAMPLE_RATE,
+            transition_duration=request.transition_duration
+        )
+        simple_filename = f"simple_{uuid.uuid4().hex}.wav"
+        exporter.export_wav(simple_audio, os.path.join(OUTPUT_DIR, simple_filename))
+
+        ai_filename = f"ai_{uuid.uuid4().hex}.wav"
+        ai_path = os.path.join(OUTPUT_DIR, ai_filename)
+
+        result = generator.generate_transition(
+            track1_path,
+            track2_path,
+            transition_duration=request.transition_duration,
+            output_path=ai_path,
+            style=request.style,
+            overlap_duration=request.overlap_duration
+        )
+
+        track1_analysis = TrackAnalysis(
+            bpm=result['analysis_track1']['bpm'],
+            energy=result['analysis_track1']['energy'],
+            key=result['analysis_track1']['key'],
+            mode=result['analysis_track1']['mode'],
+            key_confidence=result['analysis_track1']['key_confidence'],
+            duration=result['analysis_track1']['duration'],
+            best_outro_time=result['analysis_track1']['best_outro']['time'],
+            best_intro_time=result['analysis_track1']['best_intro']['time'],
+        )
+        track2_analysis = TrackAnalysis(
+            bpm=result['analysis_track2']['bpm'],
+            energy=result['analysis_track2']['energy'],
+            key=result['analysis_track2']['key'],
+            mode=result['analysis_track2']['mode'],
+            key_confidence=result['analysis_track2']['key_confidence'],
+            duration=result['analysis_track2']['duration'],
+            best_outro_time=result['analysis_track2']['best_outro']['time'],
+            best_intro_time=result['analysis_track2']['best_intro']['time'],
+        )
+
+        decisions = explain_params(
+            params=result['params'],
+            analysis1=result['cut_info']['analysis']['track1'],
+            analysis2=result['cut_info']['analysis']['track2'],
+            harmony=result['harmony'],
+            cut_info=result['cut_info'],
+        )
+
+        return CompareResponse(
+            success=True,
+            message="Both transitions generated successfully",
+            simple_filename=simple_filename,
+            ai_filename=ai_filename,
+            simple_duration=round(len(simple_audio) / SAMPLE_RATE, 2),
+            ai_duration=round(result['duration'], 2),
+            track1_analysis=track1_analysis,
+            track2_analysis=track2_analysis,
+            ai_model_used=generator.ai_generator.mel_vae is not None,
+            harmony=result['harmony'],
+            ai_decisions=decisions,
+            audio_scores=result.get('audio_scores'),
+            mel_model_used=result.get('mel_model_used', False),
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Compare error: {str(e)}")
+
+
 @router.get("/files")
 async def list_files():
-    """Liste tous les fichiers disponibles."""
     input_files = os.listdir(UPLOAD_DIR) if os.path.exists(UPLOAD_DIR) else []
     output_files = os.listdir(OUTPUT_DIR) if os.path.exists(OUTPUT_DIR) else []
     
@@ -219,7 +302,6 @@ async def list_files():
 
 @router.get("/styles")
 async def get_styles():
-    """Retourne les styles de transition disponibles."""
     return {
         "styles": [
             {
@@ -243,12 +325,9 @@ async def get_styles():
 
 @router.get("/model/status")
 async def model_status():
-    """Retourne le statut du modèle IA."""
-    vae_loaded = generator.ai_generator.vae_model is not None
-    
+    ag = generator.ai_generator
     return {
-        "vae_model_loaded": vae_loaded,
-        "model_path": generator.ai_generator.model_path,
-        "device": generator.ai_generator.device,
-        "mode": "VAE" if vae_loaded else "Fallback (effets audio)"
+        "mel_encoder_loaded": ag.mel_encoder is not None,
+        "mel_vae_loaded": ag.mel_vae is not None,
+        "device": ag.device,
     }

@@ -1,11 +1,8 @@
-"""Schémas Pydantic pour l'API."""
-
 from pydantic import BaseModel
 from typing import Optional, Literal
 
 
 class TrackAnalysis(BaseModel):
-    """Résultat de l'analyse d'un morceau."""
     bpm: float
     energy: float
     key: str
@@ -17,16 +14,14 @@ class TrackAnalysis(BaseModel):
 
 
 class TransitionRequest(BaseModel):
-    """Requête de génération de transition."""
     track1_filename: str
     track2_filename: str
     transition_duration: float = 15.0
-    overlap_duration: float = 3.0
+    overlap_duration: float = 0.5
     style: Literal['smooth', 'drop', 'echo'] = 'smooth'
 
 
 class TransitionResponse(BaseModel):
-    """Réponse après génération de transition."""
     success: bool
     message: str
     output_filename: Optional[str] = None
@@ -36,22 +31,39 @@ class TransitionResponse(BaseModel):
     track2_analysis: Optional[TrackAnalysis] = None
     style: Optional[str] = None
     quality_info: Optional[str] = None
+    ai_decisions: Optional[list] = None
+    audio_scores: Optional[dict] = None
+    mel_model_used: bool = False
+    transition_start: Optional[float] = None
 
 
 class AnalyzeRequest(BaseModel):
-    """Requête d'analyse d'un morceau."""
     filename: str
 
 
 class AnalyzeResponse(BaseModel):
-    """Réponse d'analyse."""
     success: bool
     message: str
     analysis: Optional[TrackAnalysis] = None
 
 
+class CompareResponse(BaseModel):
+    success: bool
+    message: str
+    simple_filename: Optional[str] = None
+    ai_filename: Optional[str] = None
+    simple_duration: Optional[float] = None
+    ai_duration: Optional[float] = None
+    track1_analysis: Optional[TrackAnalysis] = None
+    track2_analysis: Optional[TrackAnalysis] = None
+    ai_model_used: bool = False
+    harmony: Optional[dict] = None
+    ai_decisions: Optional[list] = None
+    audio_scores: Optional[dict] = None
+    mel_model_used: bool = False
+
+
 class HealthResponse(BaseModel):
-    """Réponse du health check."""
     status: str
     version: str
     ai_model_loaded: bool = False
