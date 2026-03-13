@@ -8,7 +8,7 @@ model = TransitionParamsVAE(
     input_dim=28,
     hidden_dim=512,
     latent_dim=128,
-    output_dim=38
+    output_dim=24
 )
 
 model.load_state_dict(checkpoint['model_state_dict'])

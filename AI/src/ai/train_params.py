@@ -74,21 +74,25 @@ def train_params_model(music_folder="data/input/music_train/fma_small/fma_small"
                        max_pairs=2000,
                        batch_size=32,
                        learning_rate=0.0003,
-                       save_path="models/params_vae.pth"):
-    
+                       save_path="models/params_vae.pth",
+                       dataset_path="data/dataset/params_dataset.pkl"):
+
     print("=" * 60)
     print("  DJ AI TRANSITION MODEL - TRAINING")
     print("=" * 60)
-    
+
     dataset = TransitionParamsDataset()
-    dataset.build_from_folder(music_folder, max_songs=max_songs, max_pairs=max_pairs)
-    
-    if len(dataset) == 0:
-        print("Error: No training data")
-        return
-    
-    os.makedirs("data/dataset", exist_ok=True)
-    dataset.save("data/dataset/params_dataset.pkl")
+
+    if os.path.exists(dataset_path):
+        print(f"Loading existing dataset: {dataset_path}")
+        dataset.load(dataset_path)
+    else:
+        dataset.build_from_folder(music_folder, max_songs=max_songs, max_pairs=max_pairs)
+        if len(dataset) == 0:
+            print("Error: No training data")
+            return
+        os.makedirs(os.path.dirname(dataset_path), exist_ok=True)
+        dataset.save(dataset_path)
     
     model = TransitionParamsVAE(
         input_dim=28,
