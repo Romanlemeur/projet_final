@@ -4,7 +4,7 @@ import { useState, type DragEvent } from "react";
 import { motion } from "framer-motion";
 import { type Track, type QueueItem } from "@/lib/dashboard-data";
 
-const API_URL = "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const CAMELOT: Record<string, string> = {
 	C_major: "8B",

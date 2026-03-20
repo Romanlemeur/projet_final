@@ -13,8 +13,6 @@ __pycache__/
 .mypy_cache/
 
 # ===== DONNÉES VOLUMINEUSES =====
-# Dossiers de musique
-music_train/
 data/input/
 data/output/
 data/fma/
@@ -30,10 +28,8 @@ data/dataset/
 # ===== MODÈLES IA =====
 *.pth
 *.pt
-models/
-AI/models/*.pth
-models/*.pth
-models/*.pt
+!models/mel_encoder.pth
+!models/mel_vae.pth
 models/*.h5
 models/*.pkl
 *.onnx

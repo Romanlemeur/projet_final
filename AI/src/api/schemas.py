@@ -47,21 +47,6 @@ class AnalyzeResponse(BaseModel):
     analysis: Optional[TrackAnalysis] = None
 
 
-class CompareResponse(BaseModel):
-    success: bool
-    message: str
-    simple_filename: Optional[str] = None
-    ai_filename: Optional[str] = None
-    simple_duration: Optional[float] = None
-    ai_duration: Optional[float] = None
-    track1_analysis: Optional[TrackAnalysis] = None
-    track2_analysis: Optional[TrackAnalysis] = None
-    ai_model_used: bool = False
-    harmony: Optional[dict] = None
-    ai_decisions: Optional[list] = None
-    audio_scores: Optional[dict] = None
-    mel_model_used: bool = False
-
 
 class HealthResponse(BaseModel):
     status: str

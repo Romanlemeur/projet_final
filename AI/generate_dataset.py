@@ -207,4 +207,4 @@ def generate_synthetic_dataset(n_pairs=10000, save_path='data/dataset/params_dat
 
 if __name__ == '__main__':
     generate_synthetic_dataset(n_pairs=10000)
-    print('\n  Next step: python train_model.py')
+    print('\n  Next step: python train_mel_encoder.py')

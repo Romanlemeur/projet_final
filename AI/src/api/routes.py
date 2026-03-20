@@ -6,14 +6,13 @@ from fastapi.responses import FileResponse
 from src.api.schemas import (
     TransitionRequest, TransitionResponse,
     AnalyzeRequest, AnalyzeResponse,
-    TrackAnalysis, HealthResponse, CompareResponse
+    TrackAnalysis, HealthResponse
 )
 from src.audio.loader import AudioLoader
 from src.analysis.feature_extractor import FeatureExtractor
 from src.analysis.beat_detector import BeatDetector
 from src.analysis.key_analyzer import KeyAnalyzer
 from src.transition.generator import TransitionGenerator
-from src.transition.simple_crossfade import simple_crossfade
 from src.audio.exporter import AudioExporter
 from src.utils.config import SAMPLE_RATE
 from src.utils.explainer import explain_params
@@ -204,89 +203,6 @@ async def download_file(filename: str):
         filename=filename
     )
 
-
-@router.post("/compare", response_model=CompareResponse)
-async def compare_transitions(request: TransitionRequest):
-    track1_path = os.path.join(UPLOAD_DIR, request.track1_filename)
-    track2_path = os.path.join(UPLOAD_DIR, request.track2_filename)
-
-    if not os.path.exists(track1_path):
-        raise HTTPException(status_code=404, detail="Track 1 not found")
-    if not os.path.exists(track2_path):
-        raise HTTPException(status_code=404, detail="Track 2 not found")
-
-    try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-        audio1, _ = loader.load(track1_path)
-        audio2, _ = loader.load(track2_path)
-
-        simple_audio = simple_crossfade(
-            audio1, audio2, SAMPLE_RATE,
-            transition_duration=request.transition_duration
-        )
-        simple_filename = f"simple_{uuid.uuid4().hex}.wav"
-        exporter.export_wav(simple_audio, os.path.join(OUTPUT_DIR, simple_filename))
-
-        ai_filename = f"ai_{uuid.uuid4().hex}.wav"
-        ai_path = os.path.join(OUTPUT_DIR, ai_filename)
-
-        result = generator.generate_transition(
-            track1_path,
-            track2_path,
-            transition_duration=request.transition_duration,
-            output_path=ai_path,
-            style=request.style,
-            overlap_duration=request.overlap_duration
-        )
-
-        track1_analysis = TrackAnalysis(
-            bpm=result['analysis_track1']['bpm'],
-            energy=result['analysis_track1']['energy'],
-            key=result['analysis_track1']['key'],
-            mode=result['analysis_track1']['mode'],
-            key_confidence=result['analysis_track1']['key_confidence'],
-            duration=result['analysis_track1']['duration'],
-            best_outro_time=result['analysis_track1']['best_outro']['time'],
-            best_intro_time=result['analysis_track1']['best_intro']['time'],
-        )
-        track2_analysis = TrackAnalysis(
-            bpm=result['analysis_track2']['bpm'],
-            energy=result['analysis_track2']['energy'],
-            key=result['analysis_track2']['key'],
-            mode=result['analysis_track2']['mode'],
-            key_confidence=result['analysis_track2']['key_confidence'],
-            duration=result['analysis_track2']['duration'],
-            best_outro_time=result['analysis_track2']['best_outro']['time'],
-            best_intro_time=result['analysis_track2']['best_intro']['time'],
-        )
-
-        decisions = explain_params(
-            params=result['params'],
-            analysis1=result['cut_info']['analysis']['track1'],
-            analysis2=result['cut_info']['analysis']['track2'],
-            harmony=result['harmony'],
-            cut_info=result['cut_info'],
-        )
-
-        return CompareResponse(
-            success=True,
-            message="Both transitions generated successfully",
-            simple_filename=simple_filename,
-            ai_filename=ai_filename,
-            simple_duration=round(len(simple_audio) / SAMPLE_RATE, 2),
-            ai_duration=round(result['duration'], 2),
-            track1_analysis=track1_analysis,
-            track2_analysis=track2_analysis,
-            ai_model_used=generator.ai_generator.mel_vae is not None,
-            harmony=result['harmony'],
-            ai_decisions=decisions,
-            audio_scores=result.get('audio_scores'),
-            mel_model_used=result.get('mel_model_used', False),
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Compare error: {str(e)}")
 
 
 @router.get("/files")
